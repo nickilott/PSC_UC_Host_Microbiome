@@ -42,7 +42,7 @@ dependencies:
   - r-reshape=0.8.8
   - r-rmarkdown=1.16
   - r-tidyr=0.8.3
-  - r-vegan=2.5_6=
+  - r-vegan=2.5_6
   - r-venndiagram=1.6.20
   - r-wgcna=1.69
 
