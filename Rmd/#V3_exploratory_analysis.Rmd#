@@ -1,0 +1,733 @@
+---
+title: Exploratory analysis of microbiome data
+header-includes: #allows you to add in your own Latex packages
+- \usepackage{float} #use the 'float' package
+- \floatplacement{figure}{H} #make every figure with caption = h
+output:
+  pdf_document:
+    fig_caption: true
+    keep_tex: true
+    latex_engine: pdflatex
+  html_document:
+    df_print: paged
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup.16s.exploratory, include=FALSE}
+#source("config.R")
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+# knitr::opts_chunk$set(fig.pos = 'H')
+knitr::opts_knit$set(root.dir = "../")
+
+# set colours here
+group.colours <- c("red3", "black", "green3")
+names(group.colours) <- c("UC", "HEALTHY", "PSC/UC")
+
+# cluster colors
+library(RColorBrewer)
+cluster.colors <- brewer.pal(5, "Set3")
+names(cluster.colors) <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster 5")
+
+# tissue colors
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+```
+
+```{r load.libraries.16s.exploratory, echo=FALSE, message=FALSE}
+source("R/relab.R")
+library(knitr)
+library(gridExtra)
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(data.table)
+library(ggpubr)
+library(car)
+source("R/diversity.R")
+source("R/utils.R")
+source("R/plots.R")
+source("R/relab.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+source("R/alphaBoxplot.R")
+source("R/anova.R")
+source("R/withinIndividualDissimilarity.R")
+source("R/librarySizeVsAlphaDiversity.R")
+source("R/getSummary.R")
+source("R/deseq2_helper.R")
+source("R/correlate.R")
+library("psych")
+library(dplyr)
+library(RColorBrewer)
+```
+
+## Data analyis {.tabset .tabset-pills}
+
+### Overview
+]
+For the purposes of potentially integrating the data we have here with the RNA-seq data also generated for these samples, I am only going to look at the biopsy samples. This takes a level of complexity out of the data analysis which may confuse things.
+
+### Sample overview
+
+Samples are removed if they have < 5000 reads
+
+```{r sample.characteristics, echo=FALSE, message=FALSE}
+
+metadata <- read.csv("metadata/metadata_microbiome.tsv", header=T, stringsAsFactors=F, sep="\t")
+metadata$sample <- metadata$Code
+rownames(metadata) <- metadata$sample
+
+# control data
+metadata.control <- metadata[metadata$Disease == "CONTROL",]
+
+# Just get biopsy samples
+metadata <- metadata[metadata$Sample.collection.method == "Biopsy",]
+
+# Remove the colon samples, inflamed rectum and small duct PSC samples
+metadata <- metadata[metadata$Tissue.location != "colon",]
+metadata <- metadata[metadata$Tissue.location != "Rectum (inflamed)",]
+metadata <- metadata[metadata$Tissue.location != "Sigmoid colon",]
+metadata <- metadata[metadata$Disease != "SDPSC/UC",]
+
+# read ASVs
+asvs <- read.csv("counts/taxa_abundances.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+
+# include control asvs (endoscope)
+asvs.with.control <- asvs[,append(metadata$sample, metadata.control$Code),]
+metadata.with.control <- bind_rows(metadata, metadata.control)
+
+# sample asvs
+
+# specify number of reads for cutoff
+nreadscutoff <- 10000
+asvs <- asvs[, metadata$sample]
+asvs <- asvs[,colSums(asvs) >= nreadscutoff]
+
+# subset metadata
+metadata <- metadata[colnames(asvs),]
+
+```
+
+```{r read.all, echo=FALSE, message=FALSE}
+
+# Here I read all of the files at each taxonomic level and
+# resolve them to fit with the filtered metadata/asvs above
+readAndFormat <- function(matrix.file, level="s", metadata){
+  dat <- read.csv(matrix.file, header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+  dat <- dat[grep(paste0(level, "__NA"), rownames(dat), invert=TRUE),]
+  dat <- dat[,metadata$Code]
+  return(dat)
+}
+
+
+species.counts <- readAndFormat("counts/species_abundance.tsv", level="s", metadata)
+genus.counts <- readAndFormat("counts/genus_abundance.tsv", level="g", metadata)
+family.counts <- readAndFormat("counts/family_abundance.tsv", level="f", metadata)
+order.counts <- readAndFormat("counts/order_abundance.tsv", level="o", metadata)
+class.counts <- readAndFormat("counts/class_abundance.tsv", level="c", metadata)
+
+```
+
+```{r write.out.metadata, echo=FALSE, message=FALSE}
+# write out
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+write.table(metadata, file="export.dir/metadata_filtered.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+
+summaries <- table(data.frame(group=metadata$Disease, location=metadata$Tissue.location, collection=metadata$Sample.collection.method))
+kable(data.frame(summaries))
+
+
+```
+
+### General characteristics
+
+First I look at the general characteristics of the data in terms of the major phyla that are present in the biopsies.
+
+```{r phyla, fig.height=5, fig.width=22, echo=FALSE, message=FALSE}
+
+# read in data
+phyla <- read.csv("/gfs/work/nilott/proj031_proj040/analysis/V3/dada2_1/taxonomy_abundances.dir/phylum_abundance.tsv",
+                  header=TRUE,
+		  stringsAsFactors=FALSE,
+		  sep="\t",
+		  row.names=1)
+
+# Will need to look at the control sample - Endoscope
+phyla.endoscope <- as.data.frame(phyla[,"AG120"])
+rownames(phyla.endoscope) <- rownames(phyla)
+phyla.endoscope <- relab(phyla.endoscope)
+phyla.endoscope$phylum <- rownames(phyla.endoscope)
+phyla.endoscope.m <- melt(phyla.endoscope)
+
+# order the same as the metadata
+phyla <- phyla[,rownames(metadata)]
+
+# remove controls and samples that have < 5000 reads (those present in metadata)
+phyla <- phyla[,grep("dil", metadata$Tissue.location, invert=TRUE)]
+
+
+# Remove endoscope control from main data
+phyla <- phyla[,grep("Endoscope", colnames(phyla), invert=TRUE)]
+
+# relative abundance
+phyla <- relab(phyla)
+
+phyla <- phyla[order(rowMeans(phyla), decreasing=TRUE),]
+
+# get colours
+phylum.colours <- brewer.pal(nrow(phyla), "Set3")
+phylum.colours <- append(phylum.colours, brewer.pal(nrow(phyla), "Paired"))
+
+names(phylum.colours) <- rownames(phyla)
+
+# split by tissue
+biopsy.caecum.samples <- rownames(metadata[metadata$Tissue.location == "Caecum" & metadata$Sample.collection.method == "Biopsy",])
+biopsy.ileum.samples <- rownames(metadata[metadata$Tissue.location == "Ileum" & metadata$Sample.collection.method == "Biopsy",])
+biopsy.rectum.samples <- rownames(metadata[metadata$Tissue.location == "Rectum" & metadata$Sample.collection.method == "Biopsy",])
+
+biopsy.caecum.phyla <- phyla[,biopsy.caecum.samples]
+biopsy.ileum.phyla <- phyla[,biopsy.ileum.samples]
+biopsy.rectum.phyla <- phyla[,biopsy.rectum.samples]
+
+toplot <- list(biopsy.caecum.phyla,
+               biopsy.ileum.phyla,
+	       biopsy.rectum.phyla)
+
+grobs.list.phylum <- list()
+for (i in 1:length(toplot)){
+    df <- toplot[[i]]
+    # order by rowMeans to get the average composition
+    phyla.order <- df[order(rowMeans(df), decreasing=TRUE),]
+
+    # get the phyla that make up 99% of the data
+    cumulative.relab <- cumsum(rowMeans(phyla.order))
+    to.take <- names(cumulative.relab[cumulative.relab <= 99])
+    
+    # subset the data
+    df <- df[to.take,]
+
+    df$phylum <- rownames(df)
+
+    # melt data as input into plotBar
+    df.m <- melt(df)
+
+    p <- plotBar(df.m, colname="phylum") + scale_fill_manual(values=phylum.colours)
+    p <- p #+ theme(text=element_text(size=6))
+    
+    grobs.list.phylum[[i]] <- p
+}
+
+phyla.endoscope.m <- phyla.endoscope.m[phyla.endoscope.m$value >= 5,]
+p.endoscope <- plotBar(phyla.endoscope.m, colname="phylum") + scale_fill_manual(values=phylum.colours) #+ theme(text=element_text(size=6))
+grobs.list.phylum[[4]] <- p.endoscope
+grid.arrange(grobs=grobs.list.phylum, ncol=4, nrow=1)
+
+barplots <- arrangeGrob(grobs=grobs.list.phylum, ncol=4, nrow=1)
+ggsave("export.dir/phylum_barplots.pdf", plot=barplots, height=2, width=14)
+
+barplots
+```
+
+The endoscope control looks different to the experimental samples. I'm not too worried about contamination at this point especially given the results of the serial dilution samples.
+
+
+### PCA
+
+```{r pca.with.control, echo=FALSE, message=FALSE, fig.height=10, fig.width=15}
+asvs.with.control.relab <- relab(asvs.with.control) 
+asvs.with.control.relab.log <- log10(asvs.with.control.relab+1E-6)
+
+metadata.with.control$type <- ifelse(metadata.with.control$Disease == "CONTROL", "Endoscope control", "sample")
+
+p.pca.with.control <- plotPrincipleComponents(runPCA(asvs.with.control.relab.log, scale=FALSE), metadata.with.control, colourby="type") + scale_colour_manual(values=c("lightgrey", "red4")) + theme(legend.position="none")
+
+# also plot the number of asvs
+nasvs <- getNumberOfASVs(asvs.with.control)
+metadata.with.control$library.size <- getLibrarySize(asvs.with.control)$nreads
+metadata.with.control$nasvs <- nasvs$count
+
+cor.lib <- cor.test(metadata.with.control$library.size, metadata.with.control$nasvs)
+
+p.library.size.with.control <- ggplot(metadata.with.control, aes(x=library.size, y=nasvs, color=type, size=type)) + geom_point() + theme_bw() + scale_size_manual(values=c(2,1)) + scale_colour_manual(values=c("red4", "lightgrey")) + geom_vline(xintercept=nreadscutoff, linetype="dashed", color="grey", size=0.5) + stat_smooth(method="lm") + geom_text(inherit.aes=FALSE, hjust=0, x=2e+04, y=275, label=paste0("r=", round(cor.lib$estimate,2), "\n", "p=", round(cor.lib$p.value,6))) + scale_x_log10() + xlab("Library size (No. Reads)") + ylab("No. ASVs") + theme(legend.position="none")
+
+# Also plot library size by tissue type
+metadata.with.control$Tissue.location <- factor(metadata.with.control$Tissue.location, levels=c("Ileum", "Caecum", "Rectum", "Endoscope"))
+
+p.library.size.tissue <- ggplot(metadata.with.control[metadata.with.control$Tissue.location != "Endoscope",], aes(x=Tissue.location, y=library.size, color=Tissue.location)) + geom_boxplot(outlier.alpha=0) + geom_jitter(height=0, width=0.25) + scale_color_manual(values=tissue.colours) + theme_bw() + stat_compare_means(comparisons=list(c(1,2), c(2,3), c(1,3)), label="p.signif") + scale_y_log10() + xlab("Tissue") + ylab("Library size (No. Reads)") + theme(legend.position="none")
+
+# same for disease
+
+p.library.size.disease <- ggplot(metadata.with.control[metadata.with.control$Tissue.location != "Endoscope",], aes(x=Disease, y=library.size, color=Disease)) + geom_boxplot() + geom_jitter(height=0, width=0.25) + scale_color_manual(values=group.colours) + theme_bw() + stat_compare_means(comparisons=list(c(1,2), c(2,3), c(1,3)), label="p.signif") + scale_y_log10() + xlab("Group") + ylab("Library size (No. Reads)") + facet_wrap(~Tissue.location) + theme(legend.position="none")
+
+layout.matrix <- rbind(c(1,2,3), c(4,4,4))
+grid.arrange(grobs=list(p.pca.with.control, p.library.size.with.control, p.library.size.tissue, p.library.size.disease), layout_matrix=layout.matrix)
+```
+
+There aren't really any major issues with any differences between groups of interst and library sizes etc. They are all not statistically significant.
+
+### Endoscope control ASV abundances
+
+If the ASVs that are present in the endoscope control are true contaminants then they will be correlated with DNA abundance. 
+
+#### Correlation with DNA concentration
+
+```{r endoscope.cor.with.conc, echo=FALSE, message=FALSE}
+
+endoscope.asvs <- rownames(asvs.with.control[asvs.with.control$AG120 > 0, ])
+
+asvs.relab.log <- log10(relab(asvs) + 1E-6)[endoscope.asvs,]
+metadata.forcor <- metadata[colnames(asvs.relab.log),]
+cors.endoscope <- correlateMatrixWithVector(asvs.relab.log, metadata.forcor$Conc, method="pearson")
+kable(cors.endoscope)
+
+ggplot(cors.endoscope, aes(x=cor)) + geom_density() + theme_bw()
+
+```
+
+None of the ASVs in the endoscope control are correlated with DNA concentration - suggests not contamination.
+
+
+#### Prevalence and abundance of endoscope control ASVs
+
+I have a feeling that the ASVs in the endoscope control are more likely to have come from index switching and cross-well contamination rather than contamination from the endoscope itself. If they are indeed cross-well contamination or index switching events then we would expect that they would be follow the same patterns in the experimental samples as all other ASVs. This is what I plot below.
+
+```{r prevalence.of.endoscope.asvs, fig.height=5, fig.width=20, echo=FALSE, message=FALSE}
+
+asvs.prev <- pprev(asvs)
+asvs.prev$type <- ifelse(as.character(asvs.prev$Taxon) %in% endoscope.asvs, "Endoscope ASV", "Sample ASV")
+asvs.prev$abundance <- unlist(rowMeans(relab(asvs)))
+
+p.prev <- ggplot(asvs.prev, aes(x=abundance, y=Prevalence, color=type, size=type)) + geom_point() + theme_bw() + scale_color_manual(values=c("red4", "lightgrey")) + scale_size_manual(values=c(1.5,1)) + geom_point(data=asvs.prev[asvs.prev$type=="Endoscope ASV",])
+
+# plot whether there are mean differences between the ASV groups
+p.diff.abundance <- ggplot(asvs.prev, aes(x=type, y=log10(abundance + 1E-6), color=type)) + geom_violin() + theme_bw() + stat_compare_means(comparisons=list(c(1,2))) + scale_color_manual(values=c("red4", "lightgrey"))
+
+p.diff.prevalence <- ggplot(asvs.prev, aes(x=type, y=Prevalence, color=type)) + geom_violin() + theme_bw() + stat_compare_means(comparisons=list(c(1,2))) + scale_color_manual(values=c("red4", "lightgrey"))
+
+grid.arrange(p.prev, p.diff.abundance, p.diff.prevalence, nrow=1)
+```
+
+They do seem to follow the same patterns of abundance and prevalence as the experimental ASVs and are therefore unlikely to be contaminants.
+
+#### Running decontam
+
+It doesn't look as if the ASVs in the endoscope control are contaminants. We can test this within the decontam statistical framework. This is not executed for now.
+
+```{r run.decontam, echo=FALSE, message=FALSE}
+
+# sample.data <- metadata.with.control
+# rownames(sample.data) <- sample.data$Code
+# sample.data$isControl <- ifelse(sample.data$Tissue.location == #"Endoscope", "Yes", "No")
+#asvs.phyobj <- phyloseq::otu_table(asvs.with.control.relab, #taxa_are_rows=TRUE)
+#sample.data.phyobj <- phyloseq::sample_data(sample.data)
+#decontam.phyobj <- phyloseq::merge_phyloseq(asvs.phyobj, #sample.data.phyobj) 
+#contamdf.freq <- decontam::isContaminant(ps, method="frequency", #conc="Conc")
+```
+
+### Diversity metrics
+
+#### Relationship between library size and alpha diversity
+
+Above were the data that included the endoscope ccontrol. Below I take this out and continue with the sample data. First I look at the relationship between the library size and the richness estimates (Shannon). The ASVs that have at least a phylum-level assignment are kept.
+
+```{r library.size.vs.shannon, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+# We only keep the ASVs that can be annotated to at least phylum-level. The unknown ones are likely from host -
+# This has at least been shown for a couple of unannotated ASVs.
+asvs <- asvs[grep("p__NA", rownames(asvs), invert=TRUE),]
+
+# get a table of the average (min and max) number of ASVs per sample
+nasvs <- getNumberOfASVs(asvs)
+nasvs <- data.frame(mean=mean(nasvs$count),
+                    min=min(nasvs$count),
+		    max=max(nasvs$count))
+kable(nasvs, caption="Number of ASVs")
+
+dat <- otu_table(asvs, taxa_are_rows=TRUE)
+sample.data <- sample_data(metadata)
+dat <- merge_phyloseq(dat, sample.data)
+
+richness <- estimate_richness(dat, measures=c("Shannon"))
+metadata$shannon <- richness$Shannon
+
+nasvs <- getNumberOfASVs(asvs)
+metadata$nasvs <- nasvs$count
+
+metadata$library.size <- getLibrarySize(asvs)$nreads
+metadata$batch <- ifelse(grepl("NI", metadata$Code), "batch2", "batch1")
+
+p1 <- ggplot(metadata, aes(x=library.size, y=shannon)) + geom_point() + theme_bw() + geom_smooth(method="lm") + scale_x_log10() + xlab("Library size (No. Reads)") + ylab("Shannon index") + facet_wrap(~batch)
+
+p2 <- ggplot(metadata, aes(x=library.size, y=nasvs)) + geom_point() + theme_bw() + geom_smooth(method="lm") + scale_x_log10() + xlab("Library size (No. Reads)") + ylab("No. ASVs") + facet_wrap(~batch)
+
+grid.arrange(p1, p2, nrow=1)
+
+```
+
+These were run in two batches and the second run has many more reads. This does not however affect the alpha diversity (Shannon).
+
+
+### Alpha diversity across locations
+
+Here we do a rough comparison of alpha diversity across the tissues. Significance is defined by the kruskal Wallis test of each factor against Shannon diversity and number of ASVs separately.
+
+```{r alpha.diversity, fig.height=5, fig.width=12, echo=FALSE, message=FALSE}
+
+p.alpha <- ggplot(metadata, aes(x=Disease, y=shannon, group=Disease, colour=Disease))
+p.alpha <- p.alpha + geom_boxplot()
+p.alpha <- p.alpha + theme_bw() + facet_grid(~Tissue.location + batch)
+p.alpha <- p.alpha + geom_jitter(width=0.2)
+p.alpha <- p.alpha + scale_colour_manual(values=group.colours) + ggtitle("Shannon") + stat_compare_means(comparisons = list(c(2,3), c(1,2), c(1,3)), label="p.value")
+p.alpha
+
+to.test.shannon <- data.frame(patient.id=metadata$Patient.ID,
+                              alpha.diversity=metadata$shannon,
+                              tissue.location=metadata$Tissue.location,
+		                          group=metadata$Disease,
+		                          batch=metadata$batch)
+
+d <- multiFactorKruskalTest(to.test.shannon)
+kable(d, caption="Shannon diversity")
+
+p.rich <- ggplot(metadata, aes(x=Disease, y=nasvs, group=Disease, colour=Disease))
+p.rich <- p.rich + geom_boxplot()
+p.rich <- p.rich + facet_grid(~Tissue.location + batch)
+p.rich <- p.rich + theme_bw()
+p.rich <- p.rich + geom_jitter(width=0.2)
+p.rich <- p.rich + scale_colour_manual(values=group.colours) + ggtitle("Number of ASVs") + stat_compare_means(comparisons = list(c(2,3),c(1,2), c(1,3)), label="p.value")
+p.rich
+
+to.test.nasvs <- data.frame(patient.id=metadata$Patient.ID,
+                            alpha.diversity=metadata$nasvs,
+                            tissue.location=metadata$Tissue.location,
+		                        group=metadata$Disease,
+                  		      library.size=metadata$library.size,
+		                        batch=metadata$batch)
+
+d <- multiFactorKruskalTest(to.test.nasvs)
+kable(d, caption="Number of ASVs")
+
+```
+
+From the plots it looks like there are effects of batch - the second batch was sequenced to significantly higher depth than batch1. Also the first batch included the MM12 controls and so there may have been some issue with cross-well contamination (possibly) in batch1 vs. batch2. This makes things slightly difficult to interpret overall but given the difference in batches I think it is difficult to conclude that there are anuy concrete differences between groups.
+
+
+Below are crude kruskall-wallis tests with no accounting for batch.
+
+```{r alpha.diversity.by.tissue, fig.height=5, fig.width=17, echo=FALSE, message=FALSE}
+
+# significance testing
+to.test.caecum.shannon <- to.test.shannon[to.test.shannon$tissue.location == "Caecum",]
+to.test.caecum.shannon <- to.test.caecum.shannon[,grep("tissue.location", colnames(to.test.caecum.shannon), invert=TRUE)]
+
+to.test.ileum.shannon <- to.test.shannon[to.test.shannon$tissue.location == "Ileum",]
+to.test.ileum.shannon <- to.test.ileum.shannon[,grep("tissue.location", colnames(to.test.ileum.shannon), invert=TRUE)]
+
+to.test.rectum.shannon <- to.test.shannon[to.test.shannon$tissue.location == "Rectum",]
+to.test.rectum.shannon <- to.test.rectum.shannon[,grep("tissue.location", colnames(to.test.rectum.shannon), invert=TRUE)]
+
+d.caecum.psc.healthy.shannon <- multiFactorKruskalTest(to.test.caecum.shannon[to.test.caecum.shannon$group != "UC",])
+d.caecum.uc.healthy.shannon <- multiFactorKruskalTest(to.test.caecum.shannon[to.test.caecum.shannon$group != "PSC/UC",])
+d.caecum.psc.uc.shannon <- multiFactorKruskalTest(to.test.caecum.shannon[to.test.caecum.shannon$group != "HEALTHY",])
+
+d.ileum.psc.healthy.shannon <- multiFactorKruskalTest(to.test.ileum.shannon[to.test.ileum.shannon$group != "UC",])
+d.ileum.uc.healthy.shannon <- multiFactorKruskalTest(to.test.ileum.shannon[to.test.ileum.shannon$group != "PSC/UC",])
+d.ileum.psc.uc.shannon <- multiFactorKruskalTest(to.test.ileum.shannon[to.test.ileum.shannon$group != "HEALTHY",])
+
+d.rectum.psc.healthy.shannon <- multiFactorKruskalTest(to.test.rectum.shannon[to.test.rectum.shannon$group != "UC",])
+d.rectum.uc.healthy.shannon <- multiFactorKruskalTest(to.test.rectum.shannon[to.test.rectum.shannon$group != "PSC/UC",])
+d.rectum.psc.uc.shannon <- multiFactorKruskalTest(to.test.rectum.shannon[to.test.rectum.shannon$group != "HEALTHY",])
+
+kable(d.caecum.psc.healthy.shannon, caption="Caecum PSC vs. healthy (Shannon)")
+kable(d.caecum.uc.healthy.shannon, caption="Caecum UC vs. healthy (Shannon)")
+kable(d.caecum.psc.uc.shannon, caption="Caecum PSC vs. UC (Shannon)")
+
+kable(d.ileum.psc.healthy.shannon, caption="Ileum PSC vs. healthy (Shannon)")
+kable(d.ileum.uc.healthy.shannon, caption="Ileum UC vs. healthy (Shannon)")
+kable(d.ileum.psc.uc.shannon, caption="Ileum PSC vs. UC (Shannon)")
+
+kable(d.rectum.psc.healthy.shannon, caption="Rectum PSC vs. healthy (Shannon)")
+kable(d.rectum.uc.healthy.shannon, caption="Rectum UC vs. healthy (Shannon)")
+kable(d.rectum.psc.uc.shannon, caption="Rectum PSC vs. UC (Shannon)")
+
+```
+
+Even with these crude tests there is only a significant increase in diversity in the ileum of PSC/UC patients. Given the number of tests this is not completely unexpected and these results should be taken with caution. The results are so on the cusp that the safest option is to report that there is marginal difference but likely driven at least in part by batch effects. 
+
+### Controlling for batch effects
+
+I have been looking quite a lot at how to control for batch effects in this analysis - it is still not clear whether this increase in diversity in the PSC/UC ileum is driven by batch effects. Below I perform anova controlling for batch to see whether this has an impact on the results.
+
+```{r anova.alpha, echo=FALSE, message=FALSE}
+
+# shannon diversity
+
+# Ileum
+fit.ileum <- aov(to.test.ileum.shannon$alpha.diversity ~ batch + group, to.test.ileum.shannon)
+fit.ileum <- car::Anova(fit.ileum, type="III")
+print(fit.ileum)
+
+# Caecum
+fit.caecum <- aov(to.test.caecum.shannon$alpha.diversity ~ batch + group, to.test.caecum.shannon)
+fit.caecum <- car::Anova(fit.caecum, type="III")
+print(fit.caecum)
+
+# Rectum
+fit.rectum <- aov(to.test.rectum.shannon$alpha.diversity ~ batch + group, to.test.rectum.shannon)
+fit.rectum <- car::Anova(fit.rectum, type="III")
+print(fit.rectum)
+
+```
+
+
+### Overall Principal Components plot
+
+As has already been seen for alpha diversity measures, the fact that the data were generated from two separate sequencing runs has had an impact. This may also have an impact on beta diversity. Here I look at the overall effect of sequencing batch on ASV-level microbiome profiles.
+
+```{r ordination.batch, fig.height=5, fig.width=12, echo=FALSE, message=FALSE}
+
+# make sure asv data and metadata are in the same order
+asvs.reordered <- asvs[,rownames(metadata)]
+asvs.reordered.relab <- relab(asvs.reordered)
+
+pc1 <- runPCA(log10(asvs.reordered.relab + 1E-06), scale=FALSE)
+pcplot1 <- plotPrincipleComponents(pc1, metadata, colourby="batch", shapeby="Tissue.location", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("purple", "grey"))
+
+# second and third principle components
+pcplot2 <- plotPrincipleComponents(pc1, metadata, colourby="batch", shapeby="Tissue.location", pcs=c("PC1", "PC3")) + scale_color_manual(values=c("purple", "grey"))
+
+ggsave("export.dir/batch_pc1_pc2.pdf", plot=pcplot2 + theme(axis.text=element_text(size=12)), height=5, width=7)
+
+grid.arrange(pcplot1, pcplot2, nrow=1)
+
+```
+
+While there is not a huge amount of variance explained by the first few principle components, there is a clustering by batch (PC2). Below I look at whether this is significant.
+
+```{r permanova, echo=FALSE, message=FALSE}
+
+perm.batch <- adonis(t(log10(asvs.reordered.relab + 1E-06)) ~ batch, method="euclidean", data=metadata, permutations=1000)
+result.batch <- data.frame(perm.batch$aov.tab)
+kable(result.batch, caption="Association of covariates")
+
+perm.tissue <- adonis(t(log10(asvs.reordered.relab + 1E-06)) ~ batch + Tissue.location, method="euclidean", data=metadata, permutations=1000)
+result.tissue <- data.frame(perm.tissue$aov.tab)
+kable(result.tissue, caption="Association of covariates")
+
+perm.disease <- adonis(t(log10(asvs.reordered.relab + 1E-06)) ~ batch + Disease, method="euclidean", data=metadata, permutations=1000)
+result.disease <- data.frame(perm.disease$aov.tab)
+kable(result.disease, caption="Association of covariates")
+```
+
+There is a significant effect of batch. There is no significant association with tissue location but there is with disease. The disease association stand when controlling for batch. In fact I will do this at genus level and use a filtering cutoff of >0.1% relative abundance in at least 14 samples (minimum for any one group).
+
+I think that in the interests of transparency in reporting in the manuscript I will include a PCA plot with each of the variables of interest - batch, disease, tissue separately coloured as below.
+
+```{r pca.by.variable, echo=FALSE, message=FALSE, fig.height=10, fig.width=15}
+
+# reorder genus counts table
+genus.counts <- genus.counts[,rownames(metadata)]
+genus.relab <- relab(genus.counts)
+
+# filter
+genus.relab <- filterRows(genus.relab, k=14, a=0.01)
+
+genus.log <- log10(genus.relab + 1E-6)
+
+pc.genus <- runPCA(genus.log, scale=FALSE)
+
+p.pca.tissue <- plotPrincipleComponents(pc.genus, metadata, colourby="Tissue.location", shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + scale_color_manual(values=tissue.colours) + geom_path(colour="lightgrey", linetype="dashed")
+
+p.pca.disease <- plotPrincipleComponents(pc.genus, metadata, colourby="Disease", shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + scale_color_manual(values=group.colours)  + geom_path(colour="lightgrey", linetype="dashed")
+
+p.pca.batch <- plotPrincipleComponents(pc.genus, metadata, colourby="batch", shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("grey", "purple"))  + geom_path(colour="lightgrey", linetype="dashed")
+
+
+p.pca.kit <- plotPrincipleComponents(pc.genus, metadata, colourby="Kit", shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("slategrey", "orange"))  + geom_path(colour="lightgrey", linetype="dashed")
+
+
+p.pca.conc <- plotPrincipleComponents(pc.genus, metadata, colourby="Conc", continuous=TRUE, shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + geom_path(colour="lightgrey", linetype="dashed") + scale_colour_gradient(low="yellow", high="red4")
+
+p.pca.nreads <- plotPrincipleComponents(pc.genus, metadata, colourby="library.size", continuous=TRUE, shapeby="none", group="Patient.ID", pcs=c("PC1", "PC2")) + geom_path(colour="lightgrey", linetype="dashed") + scale_colour_gradient(low="black", high="yellow")
+
+
+grid.arrange(p.pca.tissue, p.pca.disease, p.pca.batch, p.pca.kit, p.pca.conc, p.pca.nreads, nrow=2, ncol=3)
+
+
+#### PERMANOVA on these data
+
+perm.tissue <- adonis(t(genus.log) ~ Tissue.location, method="euclidean", data=metadata, permutations=1000)
+result.tissue <- data.frame(perm.tissue$aov.tab)
+kable(result.tissue, caption="Association of covariates")
+
+perm.disease <- adonis(t(genus.log) ~ Disease, method="euclidean", data=metadata, permutations=1000)
+result.disease <- data.frame(perm.disease$aov.tab)
+kable(result.disease, caption="Association of covariates")
+
+perm.batch <- adonis(t(genus.log) ~ batch, method="euclidean", data=metadata, permutations=1000)
+result.batch <- data.frame(perm.batch$aov.tab)
+kable(result.batch, caption="Association of covariates")
+
+# write out plots
+ggsave("export.dir/pc_by_tissue.pdf", plot=p.pca.tissue + theme(axis.text=element_text(size=12)), height=4, width=6.1)
+ggsave("export.dir/pc_by_disease.pdf", plot=p.pca.disease + theme(axis.text=element_text(size=12)), height=4, width=6.2)
+ggsave("export.dir/pc_by_batch.pdf", plot=p.pca.batch + theme(axis.text=element_text(size=12)), height=4, width=6)
+```
+
+While there is a significant batch effect, it may be that this is dependent on filtering thresholds. Below I expore this.
+
+
+```{r filter.thresholds.16s.exploratory, fig.height=10, fig.width=10, echo=FALSE, message=FALSE}
+
+asvs.reordered.relab <- relab(asvs.reordered)
+
+sub1 <- filterRows(asvs.reordered.relab, k=14, a=0.001)
+sub2 <- filterRows(asvs.reordered.relab, k=14, a=0.01)
+sub3 <- filterRows(asvs.reordered.relab, k=14, a=0.1)
+sub4 <- filterRows(asvs.reordered.relab, k=14, a=1)
+
+sub1 <- log10(sub1 + 1E-06)
+sub2 <- log10(sub2 + 1E-06)
+sub3 <- log10(sub3 + 1E-06)
+sub4 <- log10(sub4 + 1E-06)
+
+sub1.pc <- runPCA(sub1, scale=FALSE)
+sub2.pc <- runPCA(sub2, scale=FALSE)
+sub3.pc <- runPCA(sub3, scale=FALSE)
+sub4.pc <- runPCA(sub4, scale=FALSE)
+
+pc.subsets <- c("sub1.pc", "sub2.pc", "sub3.pc", "sub4.pc")
+titles <- c(">= 0.001% relab in 14 samples",
+            ">= 0.01% relab in 14 samples",
+	    ">= 0.1% relab in 14 samples",
+	    ">= 1% in 14 samples")
+
+grobs.list <- list()
+for (i in 1:length(pc.subsets)){
+    p <- plotPrincipleComponents(get(pc.subsets[i]), metadata, colourby="batch", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("purple", "grey"))
+    p <- p + ggtitle(titles[i])
+    grobs.list[[i]] <- p
+    }
+
+grid.arrange(grobs=grobs.list, ncol=2, nrow=2)
+```
+
+
+Batch effects seem to be removed when filtering on at least 1% in at least 14 samples (i.e. minimum number per group). I next to see if the association with disease holds up when this filtering is used.
+
+
+```{r disease.permanova, echo=FALSE, message=FALSE}
+
+perm.disease <- adonis(t(sub4) ~ batch + Disease, method="euclidean", data=metadata, permutations=1000)
+result.disease <- data.frame(perm.disease$aov.tab)
+kable(result.disease, caption="Association of covariates")
+
+```
+
+There does remain a significant effect of batch but it is not in the first two PCs. It may be that this is more an effect in ASVs and may disappear when aggregated at higher taxonomic levels.
+
+#### Genus
+
+```{r genus.level.pca, echo=FALSE, message=FALSE, fig.height=5, fig.width=7}
+
+# reorder genus counts table
+genus.counts <- genus.counts[,rownames(metadata)]
+genus.relab <- relab(genus.counts)
+genus.log <- log10(genus.relab + 1E-6)
+
+pc.genus <- runPCA(genus.log, scale=FALSE)
+p.genus <- plotPrincipleComponents(pc.genus, metadata, colourby="batch", shapeby="Tissue.location", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("grey", "purple"))
+
+perm.genus <- adonis(t(genus.log) ~ batch + Disease, method="euclidean", data=metadata, permutations=1000)
+result.genus <- data.frame(perm.genus$aov.tab)
+kable(result.genus, caption="Association of covariates")
+```
+
+There is still a batch effect at the genus level.
+
+#### Family
+
+```{r family.level.pca, echo=FALSE, message=FALSE, fig.height=5, fig.width=7}
+
+# reorder genus counts table
+family.counts <- family.counts[,rownames(metadata)]
+family.relab <- relab(family.counts)
+family.log <- log10(family.relab + 1E-6)
+
+pc.family <- runPCA(family.log, scale=FALSE)
+p.family <- plotPrincipleComponents(pc.family, metadata, colourby="batch", shapeby="Tissue.location", pcs=c("PC1", "PC2")) + scale_color_manual(values=c("grey", "purple"))
+
+perm.family <- adonis(t(family.log) ~ batch + Disease, method="euclidean", data=metadata, permutations=1000)
+result.family <- data.frame(perm.family$aov.tab)
+kable(result.family, caption="Association of covariates")
+```
+
+There is an even stronger association between batch and family-level profiles. There still exists an association with disease. Batch will have to be kjtaken into account when doing differential abundance testing.
+
+### Within-individual and between individual dissimilarity - tissue site
+
+Although there doesn't seem to be an effect of tissue location on microbiome composition it is of interest to known whether samples taken within an individual are closer in terms of microbiome composition than samples taken between individuals but within a site i.e. is there more variation between sites than between individuals. Below I calculate the Bray-curtis dissimilarity both within an inidividual and within each site (between individuals) to asses this.
+
+
+```{r within.inidividual.and.between.individual.dissimilarity, fig.height=5, fig.width=6, echo=FALSE, message=FALSE}
+
+# within individual biopsy
+within.biopsy <- withinIndividualDissimilarity(asvs.reordered.relab, metadata, collection.method="Biopsy")
+within.biopsy$type <- "Within-individual [Biopsy]"
+
+# between individual biopsy caecum
+between.caecum.biopsy <- betweenIndividualDissimilarity(asvs.reordered.relab, metadata, collection.method="Biopsy", tissue.location="Caecum")
+between.caecum.biopsy$type <- "Between-individual [Biopsy:Caecum]"
+
+# between individual biopsy ileum
+between.ileum.biopsy <- betweenIndividualDissimilarity(asvs.reordered.relab, metadata, collection.method="Biopsy", tissue.location="Ileum")
+between.ileum.biopsy$type <- "Between-individual [Biopsy:Ileum]"
+
+# between individual biopsy rectum
+between.rectum.biopsy <- betweenIndividualDissimilarity(asvs.reordered.relab, metadata, collection.method="Biopsy", tissue.location="Rectum")
+between.rectum.biopsy$type <- "Between-individual [Biopsy:Rectum]"
+
+all.dissimilarity <- bind_rows(within.biopsy,
+			       between.caecum.biopsy,
+			       between.ileum.biopsy,
+			       between.rectum.biopsy)
+
+# make colours
+diss.colours <- c(blues9[3], blues9[6], blues9[9], "grey")
+names(diss.colours) <- c("Between-individual [Biopsy:Ileum]",
+                         "Between-individual [Biopsy:Caecum]",
+                         "Between-individual [Biopsy:Rectum]",
+                         "Within-individual [Biopsy]")
+
+all.dissimilarity$type <- factor(all.dissimilarity$type, levels=names(diss.colours))
+
+p.dissimilarity <- ggplot(all.dissimilarity, aes(x=type, y=dissimilarity, fill=type))
+p.dissimilarity <- p.dissimilarity + geom_violin() + scale_fill_manual(values=diss.colours) 
+p.dissimilarity <- p.dissimilarity + theme_bw() + theme(axis.text.x=element_text(angle=90))
+p.dissimilarity <- p.dissimilarity + stat_compare_means(comparisons=list(c(1,4), c(2,4), c(3,4)))
+p.dissimilarity <- p.dissimilarity + theme(legend.position="none")
+
+ggsave("export.dir/dissimilarity.pdf", plot=p.dissimilarity + theme(axis.text=element_text(size=6)), height=4, width=4)
+
+p.dissimilarity
+
+k1 <- kruskal.test(all.dissimilarity$dissimilarity, as.factor(all.dissimilarity$type))
+kable(data.frame(chi.squared=k1$statistic, p.value=k1$p.value))
+
+```
+
+### Session Info
+
+```{r sessionInfo.16s.exploratory, echo=FALSE, message=FALSE}
+
+# write out the sessionInfo()
+print(capture.output(sessionInfo()))
+
+```

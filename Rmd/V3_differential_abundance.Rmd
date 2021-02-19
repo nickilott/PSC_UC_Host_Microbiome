@@ -1,0 +1,529 @@
+---
+title:
+header-includes: #allows you to add in your own Latex packages
+- \usepackage{float} #use the 'float' package
+- \floatplacement{figure}{H} #make every figure with caption = h
+output:
+  pdf_document:
+    fig_caption: true
+    keep_tex: true
+    latex_engine: pdflatex
+  html_document:
+    df_print: paged
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup.16s.diff, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+#knitr::opts_chunk$set(fig.pos = 'H')
+knitr::opts_knit$set(root.dir = "../")
+library(RColorBrewer)
+
+# set colour mapping here
+group.colours <- c("red3", "black", "green3")
+names(group.colours) <- c("UC", "HEALTHY", "PSC/UC")
+
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+
+# cluster colors
+cluster.colors <- brewer.pal(5, "Set3")
+names(cluster.colors) <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "CLuster 5")
+
+combined.colours <- c("red3",
+                        "black",
+                        "green3",
+                        "red3",
+                        "black",
+                        "green3",
+                        "red3",
+                        "black",
+                        "green3")
+
+names(combined.colours) <- c("IleumUC",
+                             "IleumHEALTHY",
+                             "IleumPSC/UC",
+                             "CaecumUC",
+                             "CaecumHEALTHY",
+                             "CaecumPSC/UC", 
+                             "RectumUC",
+                             "RectumHEALTHY",
+                             "RectumPSC/UC")
+
+```
+
+# DESeq2 Summary Report 
+
+We have shown that there are no differences between tissue sites. However there is a significant effect on overall microbiome composition (beta diversity) of disease. It may be that even the same bacteria are having different associations at each site. We have also seen that there is a significant association betwen beta diversity and sequencing batch (these were also processed at a different time). Therefore sequencing batch will be added as a covariate in all the downstream analysis.
+
+```{r load.libraries.16s.diff, echo=FALSE, message=FALSE}
+library(gplots)
+library(gridExtra)
+library(knitr)
+library(DESeq2)
+library(vsn)
+library(RSQLite)
+library(grid)
+library(gridExtra)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+# library(patchwork)
+library(vegan)
+source("R/pathways_helper.R")
+source("R/deseq2_helper.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+source("R/threewayvenn.R")
+source("R/deseq2.R")
+source("R/utils.R")
+source("R/relab.R")
+library("limma")
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+```
+## Data analyis {.tabset .tabset-pills}
+
+### Overview
+
+This is an analysis that looks to determine differentially abundant features between tissues and/or disease groups.
+
+### Overall numbers
+
+I will base some of the filtering steps based on the number of samples that I have in each tissue/disease group. Below is a summary of these numbers.
+
+```{r summary.of.numbers.16s.diff, echo=FALSE, message=FALSE}
+metadata <- read.csv("metadata/metadata_microbiome_filtered.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(metadata) <- metadata$Code
+summary.of.numbers <- data.frame(Tissue=metadata$Tissue.location, Disease=metadata$Disease)
+kable(table(summary.of.numbers))
+
+metadata$sample <- metadata$Code
+metadata$group <- paste0(metadata$Tissue.location, metadata$Disease)
+
+# add sequencing batch
+metadata$batch <- ifelse(grepl("NI", metadata$sample), "batch2", "batch1")
+
+# reformat odd formatting in Sex data
+metadata$Sex <- ifelse(metadata$Sex == "female", "Female", metadata$Sex)
+
+```
+
+I used genus-level analyses for the beta-diversity analyses and ASV level is very variable between individuals so the lowest level that really I will go is genus. 
+
+```{r read.asvs.16s.diff, echo=FALSE, message=FALSE}
+mat <- read.csv("counts/genus_abundance.tsv", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+
+# filter counts matrix based on samples that are in the metadata
+mat <- mat[,metadata$Code]
+mat.relab <- relab(mat)
+
+# output number of reads
+ave.nreads <- data.frame(mean=mean(colSums(mat)),
+                         min=min(colSums(mat)),
+                         max=max(colSums(mat)))
+kable(ave.nreads)
+
+
+# Filter based on the same parameters as in the other analysis
+mat.relab <- filterRows(mat.relab, k=14, a=0.01)
+
+# now filter the original counts table
+mat <- mat[rownames(mat.relab),]
+```
+
+### DESeq analysis
+
+Run DESeq2 at each site with each comparison - PSC vs. Healthy, UC vs. Healthy, PSC vs. UC. The number of genera that were analysed post-filtering was `r nrow(mat)`. Below I run the analysis looking at each tissue separately and each pairwise comparison. The table summarises the results of these comparisons.
+
+```{r deseq.ileum.psc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+ileum.psc.healthy <- runDESeq2PairWithBatch(mat,
+                                            metadata,
+                                            geneid2gene_name="annotations/gene_id2gene_name",
+                        	                  tissue="Ileum",
+	                                          results.file="export.dir/genus_IleumPSC-IleumHEALTHY.result",
+	                                          c1="HEALTHY",
+	                                          c2="PSC/UC")
+```
+
+```{r deseq.ileum.uc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+ileum.uc.healthy <- runDESeq2PairWithBatch(mat,
+                                           metadata,
+                                           geneid2gene_name="annotations/gene_id2gene_name",
+                       			  	           tissue="Ileum",
+	                                         results.file="export.dir/genus_IleumUC-IleumHEALTHY.result",
+	                                         c1="HEALTHY",
+	                                         c2="UC")
+
+```
+
+```{r deseq.ileum.psc.uc.16s.diff, echo=FALSE, message=FALSE}
+
+ileum.psc.uc <- runDESeq2PairWithBatch(mat,
+                                       metadata,
+                                       geneid2gene_name="annotations/gene_id2gene_name",
+		                                   tissue="Ileum",
+	                                     results.file="export.dir/genus_IleumPSC-IleumUC.result",
+	                                     c1="UC",
+	                                     c2="PSC/UC")
+
+```
+
+```{r deseq.caecum.psc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+caecum.psc.healthy <- runDESeq2PairWithBatch(mat,
+                                             metadata,
+                                             geneid2gene_name="annotations/gene_id2gene_name",
+				                                    tissue="Caecum",           results.file="export.dir/genus_CaecumPSC-CaecumHEALTHY.result",
+	                                  c1="HEALTHY",
+	                                  c2="PSC/UC")
+```
+
+```{r deseq.caecum.uc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+caecum.uc.healthy <- runDESeq2PairWithBatch(mat,
+                                            metadata,
+                                            geneid2gene_name="annotations/gene_id2gene_name",
+				                                    tissue="Caecum",
+	                                          results.file="export.dir/genus_CaecumUC-CaecumHEALTHY.result",
+	                                          c1="HEALTHY",
+	                                          c2="UC")
+
+```
+
+```{r deseq.caecum.psc.uc.16s.diff, echo=FALSE, message=FALSE}
+
+caecum.psc.uc <- runDESeq2PairWithBatch(mat,
+                                        metadata,
+                                        geneid2gene_name="annotations/gene_id2gene_name",
+			                                  tissue="Caecum",
+	                                      results.file="export.dir/genus_CaecumPSC-CaecumUC.result",
+	                                      c1="UC",
+	                                      c2="PSC/UC")
+
+```
+
+```{r deseq.rectum.psc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+rectum.psc.healthy <- runDESeq2PairWithBatch(mat,
+                                             metadata,
+                                             geneid2gene_name="annotations/gene_id2gene_name",
+		                                         tissue="Rectum",
+	                                           results.file="export.dir/genus_RectumPSC-RectumHEALTHY.result",
+	                                           c1="HEALTHY",
+	                                           c2="PSC/UC")
+```
+
+```{r deseq.rectum.uc.healthy.16s.diff, echo=FALSE, message=FALSE}
+
+rectum.uc.healthy <- runDESeq2PairWithBatch(mat,
+                                            metadata,
+                                            geneid2gene_name="annotations/gene_id2gene_name",
+				                                    tissue="Rectum",
+	                                          results.file="export.dir/genus_RectumUC-RectumHEALTHY.result",
+	                                          c1="HEALTHY",
+	                                          c2="UC")
+
+```
+
+```{r deseq.rectum.psc.uc.16s.diff, echo=FALSE, message=FALSE}
+
+rectum.psc.uc <- runDESeq2PairWithBatch(mat,
+                                        metadata,
+                                        geneid2gene_name="annotations/gene_id2gene_name",
+			                                  tissue="Rectum",
+	                                      results.file="export.dir/genus_RectumPSC-RectumUC.result",
+	                                      c1="UC",
+	                                      c2="PSC/UC")
+
+```
+
+#### Table of results of differential abundance
+
+Below are tables that summarise the differentially expressed genera between each disease group at each tissue site.
+
+```{r table.of.results, echo=FALSE, message=FALSE}
+
+ileum.psc.healthy <- addSigColumn(ileum.psc.healthy, l2fold=0)
+ileum.uc.healthy <- addSigColumn(ileum.uc.healthy, l2fold=0)
+ileum.psc.uc <- addSigColumn(ileum.psc.uc, l2fold=0)
+
+caecum.psc.healthy <- addSigColumn(caecum.psc.healthy, l2fold=0)
+caecum.uc.healthy <- addSigColumn(caecum.uc.healthy, l2fold=0)
+caecum.psc.uc <- addSigColumn(caecum.psc.uc, l2fold=0)
+
+rectum.psc.healthy <- addSigColumn(rectum.psc.healthy, l2fold=0)
+rectum.uc.healthy <- addSigColumn(rectum.uc.healthy, l2fold=0)
+rectum.psc.uc <- addSigColumn(rectum.psc.uc, l2fold=0)
+
+kable(table(ileum.psc.healthy$sig), caption = "Ileum: PSC/UC vs Healthy")
+kable(table(ileum.uc.healthy$sig), caption = "Ileum: UC vs Healthy")
+kable(table(ileum.psc.uc$sig), caption = "Ileum: PSC/UC vs UC")
+
+kable(table(caecum.psc.healthy$sig), caption = "Caecum: PSC/UC vs Healthy")
+kable(table(caecum.uc.healthy$sig), caption = "Caecum: UC vs Healthy")
+kable(table(caecum.psc.uc$sig), caption = "Caecum: PSC/UC vs UC")
+
+kable(table(rectum.psc.healthy$sig), caption = "Rectum: PSC/UC vs Healthy")
+kable(table(rectum.uc.healthy$sig), caption = "Rectum: UC vs Healthy")
+kable(table(rectum.psc.uc$sig), caption = "Rectum: PSC/UC vs UC")
+```
+
+There are not very many differentially abundant genera here and those that are are mainly seen in UC vs. healthy. There is nothing significant between PSC/UC vs UC.
+
+### Significantly differently abundant genera
+
+Below are the genera that are significantly different in UC. These are not significantly different in PSC/UC vs UC. 
+
+```{r plot.uc.genera, echo=FALSE, message=FALSE, fig.height=20, fig.width=15}
+
+
+# Ileum
+sig.uc.ileum <- rownames(ileum.uc.healthy[!(is.na(ileum.uc.healthy$sig)),])
+relab.uc.ileum <- mat.relab[sig.uc.ileum, metadata$Tissue.location == "Ileum"]
+metadata.ileum <- metadata[metadata$Tissue.location == "Ileum",]
+rownames(relab.uc.ileum) <- getShortNames(rownames(relab.uc.ileum), type="genus", level="genus")
+p.ileum <- plotGeneOfInterest("UC vs Healthy (Ileum)", relab.uc.ileum, metadata.ileum, variable="Disease") + scale_color_manual(values=group.colours)
+
+# Caecum
+sig.uc.caecum <- rownames(caecum.uc.healthy[!(is.na(caecum.uc.healthy$sig)),])
+relab.uc.caecum <- mat.relab[sig.uc.caecum, metadata$Tissue.location == "Caecum"]
+metadata.caecum <- metadata[metadata$Tissue.location == "Caecum",]
+rownames(relab.uc.caecum) <- getShortNames(rownames(relab.uc.caecum), type="genus", level="genus")
+p.caecum <- plotGeneOfInterest("UC vs Healthy (Caecum)", relab.uc.caecum, metadata.caecum, variable="Disease") + scale_color_manual(values=group.colours)
+
+# Rectum
+sig.psc.rectum <- rownames(rectum.psc.healthy[!(is.na(rectum.psc.healthy$sig)),])
+relab.psc.rectum <- mat.relab[sig.psc.rectum, metadata$Tissue.location == "Rectum"]
+metadata.rectum <- metadata[metadata$Tissue.location == "Rectum",]
+rownames(relab.psc.rectum) <- getShortNames(rownames(relab.psc.rectum), type="genus", level="genus")
+p.rectum <- plotGeneOfInterest("PSC vs Healthy (Rectum)", relab.psc.rectum, metadata.rectum, variable="Disease") + scale_color_manual(values=group.colours)
+
+# Want the union to see how these look across all tissues
+union.sig.diffs <- union(union(sig.uc.ileum, sig.uc.caecum), sig.psc.rectum)
+
+# gather all data
+relab.uc.ileum <- mat.relab[union.sig.diffs, metadata$Tissue.location == "Ileum"]
+relab.uc.caecum <- mat.relab[union.sig.diffs, metadata$Tissue.location == "Caecum"]
+relab.psc.rectum <- mat.relab[union.sig.diffs, metadata$Tissue.location == "Rectum"]
+
+# Plot
+p.ileum2 <- plotGeneOfInterest("UC vs Healthy (Ileum)", relab.uc.ileum, metadata.ileum, variable="Disease") + scale_color_manual(values=group.colours)
+p.caecum2 <- plotGeneOfInterest("UC vs Healthy (Caecum)", relab.uc.caecum, metadata.caecum, variable="Disease") + scale_color_manual(values=group.colours)
+p.rectum2 <- plotGeneOfInterest("PSC vs Healthy (Rectum)", relab.psc.rectum, metadata.rectum, variable="Disease") + scale_color_manual(values=group.colours)
+
+# save the plots
+ggsave("export.dir/ileum_plots.pdf", plot=p.ileum + theme(legend.position="none"), height=2, width=4)
+ggsave("export.dir/caecum_plots.pdf", plot=p.caecum + theme(legend.position="none"), height=2, width=5.5)
+ggsave("export.dir/rectum_plots.pdf", plot=p.rectum + theme(legend.position="none"), height=2, width=1.7)
+
+grid.arrange(p.ileum, p.caecum, p.rectum, nrow=3)
+grid.arrange(p.ileum2, p.caecum2, p.rectum2, nrow=3)
+
+```
+
+From the above plots it is clear that some of the disease individuals also have zero relative abundance for these genera. This may be related to undersampling in these individuals. I will try and heatmap these data with covariates that may explain why this is the case. There is also the case of batch effects that may be impacting this result even though it has been controlled for in the model - this 
+
+
+### Heatmap the significant differences in the caecum
+
+There were 4 differentially abundant genera found in the caecum so I will focus on these here. I will annotate the heatmap with potentially important covariates.
+
+Below I draw a heatmap to show the union of significant differences between any pairwise comparison.
+
+```{r heatmap.union.16s.diff, fig.height=10, fig.width=20, echo=FALSE, message=FALSE}
+
+# Annotations
+sample.annotation <- data.frame(Group=metadata.caecum$Disease,
+                                Batch=metadata.caecum$batch,
+                                Library.size=getLibrarySize(mat[,metadata.caecum$sample]),
+                                Sex=metadata.caecum$Sex,
+                                Age=metadata.caecum$Age,
+                                Kit=metadata.caecum$Kit)
+rownames(sample.annotation) <- metadata.caecum$sample
+
+annotation.colours <- list("Tissue" = c(Caecum = blues9[6], Ileum = blues9[3], Rectum = blues9[9]),
+                           "Group" = c("HEALTHY" = "black", "PSC/UC" = "green3", "UC" = "red3"),
+                           "Batch" = c("batch1" = "grey", "batch2" = "purple"),
+                           "Sex" = c("Male" = "Orange", "Female" = "slategrey", "female" = "slategrey"),
+                           "annotation" = c("none"="grey", "both" = "brown", "PSC/UC" = "green3", "UC" = "red3"))
+
+pheatmap(relab.uc.caecum,
+         annotation_col=sample.annotation,
+         annotation_colors=annotation.colours,
+         scale="row",
+         show_rownames=TRUE,
+         show_colnames=FALSE,
+         cluster_distance_cols="manhattan",
+         clustering_method="ward.D",
+         color=colorRampPalette(c("blue", "white", "red"))(75))
+
+```
+
+It's not exactly clear that we can rule out a batch effect although it is odd that the healthy individuals do not equally carry these genera in batch1 vs. batch2. The only explanation is that there is something about those individuals in batch 1 that are different to batch 2 - not sure what this is.
+
+
+### Correlate fold changes in UC vs Healthy to PSC vs Healthy
+
+In the following analysis I look at correlating fold changes between the two pairwise comparisons (i.e. each disease vs. healthy). This will reveal differences between the two disease conditions.
+
+```{r scatter.fold.changes.16s.diff, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+
+ileum.compare <- buildComparisonData(ileum.psc.healthy,
+                                     ileum.uc.healthy,
+                                     label1="PSC",
+                                     label2="UC")
+
+caecum.compare <- buildComparisonData(caecum.psc.healthy,
+                                      caecum.uc.healthy,
+                                      label1="PSC",
+                                      label2="UC")
+
+rectum.compare <- buildComparisonData(rectum.psc.healthy,
+                                      rectum.uc.healthy,
+                                      label1="PSC",
+                                      label2="UC")
+
+p.ileum <- scatterComparisons(ileum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") + xlim(-8,8) + ylim(-6,6)
+p.caecum <- scatterComparisons(caecum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") +  xlim(-8,8) + ylim(-6,6)
+p.rectum <- scatterComparisons(rectum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") + xlim(c(-8,8)) + ylim(c(-6,6))
+grid.arrange(p.ileum,
+             p.caecum,
+             p.rectum,
+             nrow=1,
+             ncol=3)
+# ggsave("export.dir/ileum_scatterplot_fold_changes.pdf", plot=p.ileum, height=5, width=5)
+# ggsave("export.dir/caecum_scatterplot_fold_changes.pdf", plot=p.caecum, height=5, width=5)
+# ggsave("export.dir/rectum_scatterplot_fold_changes.pdf", plot=p.rectum, height=5, width=5)
+
+```
+
+### Potential contaminants
+
+It is noteworthy that multiple the genera that we find as differentially abundant tend to only be present in a subset of samples. They are also suspicious in that they are genera that are not typically associated with healhty microbiomes - things like brucella cause acute disease and wouldn't be expected to be like this.It is also noteworthy that Pseudoxanthomonas, Herbaspirillum and Stenotrophomonas have been highlighted as reagent contaminants in multiple studies and highlighted in [Salter et al.](https://bmcbiol.biomedcentral.com/articles/10.1186/s12915-014-0087-z).
+
+Below I therefore assess how the genera that were identified as differentially abundant look like in the control samples.
+
+```{r contaminants.16s.diff, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+potential.contaminants <- read.csv("export.dir/potential_contaminants.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+potential.contaminants$genus <- gsub(";s__.*", "", gsub(".*:.*g__", "", potential.contaminants$potential.contaminant.asvs))
+
+to.check <- c("Brucella", "Pseudoxanthomonas", "Herbaspirillum", "Stenotrophomonas", "Parabacteroides")
+
+contams <- potential.contaminants[potential.contaminants$genus %in% to.check,]
+
+# read the metadata from before it was filtered
+metadata.ctrl <- read.csv("metadata/metadata_microbiome.tsv", header=T, stringsAsFactors=FALSE, row.names=1, sep="\t")
+
+# convert rownames of metadata to match the colnames of asv table
+rownames(metadata.ctrl) <- gsub("-", ".", rownames(metadata.ctrl))
+
+asv.df <- read.csv("counts/taxa_abundances.tsv", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+
+# re-order 
+asv.df <- asv.df[,as.character(rownames(metadata.ctrl))]
+
+# get controls
+to.keep <- rownames(metadata.ctrl[grep("dil", metadata.ctrl$Disease),])
+to.keep <- append(to.keep, rownames(metadata.ctrl[grep("CONTROL", metadata.ctrl$Disease),]))
+metadata.ctrl <- metadata.ctrl[to.keep,]
+
+asv.df <- asv.df[,to.keep]
+asv.df <- asv.df[rowSums(asv.df) > 0,]
+relab.df <- relab(asv.df)
+
+metadata.ctrl$sample <- rownames(metadata.ctrl)
+
+to.plot <- c("Herbaspirillum", "Pseudoxanthomonas")
+grobs.contams <- list()
+for (i in 1:length(to.plot)){
+  genus <- to.plot[i]
+  rel <- relab.df[grep(genus, rownames(relab.df)),]
+  p <- plotGeneOfInterest(genus, rel, metadata.ctrl, variable="Disease")
+  grobs.contams[[i]] <- p
+}
+
+grid.arrange(grobs=grobs.contams, nrow=1)
+
+to.plot <- c("Herbaspirillum", "Pseudoxanthomonas")
+grobs.contams <- list()
+for (i in 1:length(to.plot)){
+  genus <- to.plot[i]
+  rel <- relab.df[grep(genus, rownames(relab.df)),]
+  p <- plotGeneOfInterest(genus, rel, metadata.ctrl, variable="Kit")
+  grobs.contams[[i]] <- p
+}
+
+grid.arrange(grobs=grobs.contams, nrow=1)
+
+```
+
+There are two potential contaminants. It makes sense as they are both identified at the lowest dilution in the MM12. However they each come from a different kit. I will have to investigate whether the samples that are positive for these genera used those kits...
+
+```{r contams.in.samples.16s.diff, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+grobs.contams <- list()
+for (i in 1:length(to.plot)){
+  genus <- to.plot[i]
+  rel <- relab.uc.ileum[grep(genus, rownames(relab.uc.ileum)),]
+  p <- plotGeneOfInterest(genus, rel, metadata.ileum, variable="Kit")
+  grobs.contams[[i]] <- p
+}
+
+grid.arrange(grobs=grobs.contams, nrow=1)
+
+# and correlations
+to.plot <- c("Herbaspirillum", "Pseudoxanthomonas", "Stenotrophomonas", "Brucella")
+grobs.contams <- list()
+for (i in 1:length(to.plot)){
+  genus <- to.plot[i]
+  rel <- mat.relab[grep(genus, rownames(mat.relab)),]
+  rel <- rel[,colSums(rel) > 0]
+  meta.sub <- metadata[colnames(rel) ,]
+  toplot <- data.frame(rel=unlist(rel), dna=meta.sub$Conc, tissue=meta.sub$Tissue.location)
+  p <- ggplot(toplot, aes(x=dna, y=rel)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle(genus)
+  grobs.contams[[i]] <- p
+}
+grid.arrange(grobs=grobs.contams, nrow=2, ncol=2)
+
+```
+
+### Barplot of contaminants
+
+This plot is to show what these two contaminants look like in terms of relative abundance in the control samples.
+
+```{r contaminants.barplot, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+toplot <- bind_rows(relab.df[grep("Herbaspirillum", rownames(relab.df)),], relab.df[grep("Pseudoxanthomonas", rownames(relab.df)),])
+toplot$genus <- c("Herbaspirillum", "Pseudoxanthomonas")
+
+toplot.m <- melt(toplot)
+toplot.m$status <- metadata.ctrl[toplot.m$variable,]$Disease
+
+p.contams <- ggplot(toplot.m, aes(x=status, y=value, fill=genus)) + geom_bar(stat="identity") + theme_bw() + scale_fill_manual(values=c("orange", "pink"))
+
+ggsave("export.dir/contams_barplot.pdf", plot=p.contams + theme(text=element_text(size=6)), height=2, width=3)
+p.contams
+```
+
+
+
+
+
+
+
+
+
+
+

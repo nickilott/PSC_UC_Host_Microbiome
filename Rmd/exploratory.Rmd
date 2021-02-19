@@ -1,0 +1,189 @@
+## Data analysis {.tabset .tabset-pills}
+
+### Overview
+
+Here I explore the data set in terms of the covariates that are included in the metadata. I am removing any colon samples and also any PSC patients that are assigned as SDPSC (small duct).
+
+
+```{r setup.exploratory, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+knitr::opts_knit$set(root.dir="../")
+#knitr::opts_chunk$set(fig.pos = 'H')
+
+# set colour mapping here
+group.colours <- c("red3", "black", "green3")
+names(group.colours) <- c("UC", "HEALTHY", "PSC/UC")
+
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+```
+
+```{r load.libraries.exploratory, echo=FALSE, message=FALSE}
+library(knitr)
+library(ggplot2)
+library(ggrepel)
+library(car)
+source("R/deseq2_helper.R")
+#source("R/anova.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+
+if(!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+
+```
+
+```{r read.metadata.exploratory, echo=FALSE, message=FALSE}
+
+metadata <- read.csv("metadata/metadata_unfiltered_rnaseq.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+metadata[metadata == "N/A"] <- NA
+
+# create Disease column
+# metadata$Disease <- unlist(strsplit(metadata$Patient.ID, "-"))[seq(2, nrow(metadata)*2, 2)]
+
+# There shouldn't be any spaces in Disease column
+# metadata$Disease <- gsub(" ", "", metadata$Disease)
+# write.table("metadata/metadata_unfiltered_rnaseq.tsv", row.names=FALSE, quote=FALSE, sep="\t")
+
+
+# remove colon and small duct PSC
+metadata <- metadata[grep("colon", metadata$Tissue.location, invert=TRUE),]
+metadata <- metadata[grep("SDPSC", metadata$Disease, invert=TRUE),]
+rownames(metadata) <- metadata$Code
+
+# make individual a character
+metadata$Individual <- as.character(metadata$Individual)
+
+```
+
+### Nancy scores (overall and at each site)
+
+Here I look at the Nancy scores between UC and PSC/UC just to see if there are any major differences in terms of the distribution of inflammation evidence between the groups.
+
+#### PSC/UC vs. UC for overall Nancy score
+
+This looks at whether there is a significant difference in overall Nancy score in UC vs PSC/UC.
+
+```{r nancy.score.at.site.overall, echo=FALSE, message=FALSE}
+
+nancy <- data.frame(Disease=metadata$Disease, Nancy.score=metadata$nancy)
+nancy <- nancy[metadata$Tissue.location == "Ileum",]
+summary.nancy <- table(nancy)
+kable(summary.nancy)
+
+# Fishers test for significance - run on PSC/UC vs UC
+fisher.test(as.matrix(summary.nancy)[c("UC", "PSC/UC"),])
+
+```
+
+There is not a significant difference between the groups in terms of overall nancy score.
+
+#### Nancy score at site
+
+```{r nancy.score.at.site, echo=FALSE, message=FALSE}
+nancy.at.site <- data.frame(Disease=metadata$Disease, Nancy.score=metadata$nancy.score.at.site, tissue=metadata$Tissue.location)
+summary.nancy.at.site <- table(nancy.at.site)
+kable(summary.nancy.at.site)
+
+# Run fishers test at each site
+fisher.test(summary.nancy.at.site[,,"Caecum"][2:3,])
+fisher.test(summary.nancy.at.site[,,"Ileum"][2:3,])
+fisher.test(summary.nancy.at.site[,,"Rectum"][2:3,])
+
+```
+
+As expected there isn't a significant difference in inflammation scores. In fact for the majority of samples it is 0 anyway.
+
+
+```{r cpm.pca.exploratory, echo=FALSE, message=FALSE}
+
+mat <- read.csv("counts/genes.tsv.gz", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+colnames(mat) <- gsub(".hisat", "", colnames(mat))
+
+# colnames of mat need reformatting
+colnames(mat) <- gsub("_.*", "",colnames(mat))
+
+# Make sure the counts matrix has the same samples as the metadata
+mat <- mat[,metadata$Code]
+```
+
+### Read count summary
+
+From memory there was a sample that was particularly low in terms of read counts. Here I plot the read counts for each sample to see if this is indeed the case.
+
+```{r read.counts.exploratory, echo=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+nreads <- data.frame(sample=colnames(mat),
+                     read.count=colSums(mat))
+nreads$label <- ifelse(nreads$read.count < 1000000, colnames(mat), NA)
+
+ggplot(nreads, aes(x=sample, y=read.count)) + geom_point() + theme_bw() + geom_label_repel(label=nreads$label)
+
+```
+
+There is a particulary low sample and this should be removed from downstream analysis.
+
+
+### Principle components analysis
+
+Below I do a simple principle components analysis on log2(counts per million). This will hopefully identify any outlier samples and see some broad relationships between samples.
+
+
+```{r pca.overall.exploratory, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+# Remove the offending sample
+mat <- mat[,grep("AG068", colnames(mat), invert=TRUE)]
+metadata <- metadata[colnames(mat),]
+
+
+# get the cpm
+cpm <- log2cpm(mat)
+
+pc <- runPCA(cpm, scale=FALSE)
+
+# after examination it would be useful to see where potential switches have ocurred
+pc.df <- data.frame(pc$x)
+
+ileum.samples <- rownames(metadata[metadata$Tissue.location == "Ileum",])
+to.connect <- rownames(pc.df[pc.df$PC1 > 0 & rownames(pc.df) %in% ileum.samples,])
+rownames(metadata) <- metadata$Code
+to.connect <- metadata[to.connect,]$Individual
+metadata$to.connect <- ifelse(metadata$Individual %in% to.connect, metadata$Individual, NA)
+
+# plot principle components
+p1 <- plotPrincipleComponents(pc, metadata, colourby="Tissue.location", shapeby="Disease", group="to.connect", pcs=c("PC1", "PC3"))
+p1 <- p1 + scale_colour_manual(values=tissue.colours) + geom_path(colour="lightgrey", linetype="dashed")
+p1 + geom_text_repel(label=metadata$to.connect, colour="black")
+```
+
+Based on the above PCA there are two options. Either remove the samples that look strange or swap them over for each other. Initially I will remove them as I can't be 100% certain that they are a sample swap but they also do not fit the patterns that we see between tissues. Samples that are removed for downstream analysis are patient IDS ```r to.connect```. 
+
+```{r write.metadata, echo=FALSE, message=FALSE}
+metadata <- metadata[!(metadata$Individual %in% to.connect), ]
+write.table(metadata, file="metadata/metadata_rnaseq.tsv", sep="\t", row.names=FALSE, quote=FALSE)
+
+```
+
+```{r pca.samples.removed.exploratory, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+cpm <- cpm[,metadata$Code]
+pc <- runPCA(cpm, scale=FALSE)
+
+# plot principle components
+p1 <- plotPrincipleComponents(pc, metadata, colourby="Tissue.location", shapeby="Disease", group="Individual", pcs=c("PC1", "PC3"))
+p1 <- p1 + scale_colour_manual(values=tissue.colours) + geom_path(colour="lightgrey", linetype="dashed")
+ggsave("export.dir/pc1_pc3.pdf", height=5, width=6)
+p1
+
+```
+
+### Session Info
+
+```{r session.info.exploratory, echo=FALSE, message=FALSE}
+# write out the sessionInfo()
+print(capture.output(sessionInfo()))
+```

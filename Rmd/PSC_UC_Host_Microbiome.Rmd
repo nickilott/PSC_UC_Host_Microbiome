@@ -1,0 +1,85 @@
+---
+title: Tissue-dependent transcriptional and bacterial associations in PSC-associated IBD
+header-includes:
+- \usepackage{placeins}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    df_print: paged
+urlcolor: blue
+---
+
+This is an analysis of RNA-seq and 16S amplicon sequencing data across multiple tissue locations (ileum, caecum and rectum) from patients with PSC/UC, UC and healthy controls. The aims of the analysis were to:
+
+* Define tissue-defining transcriptional signatures in healthy individuals
+* Identify genes that vary with disease status
+* Determine how changes in disease associate with tissue dependency
+* Identify bacterial associations with disease
+* Determine host-microbiome correlations and whether these are tissue dependent
+
+
+## 1. Exploratory analysis
+
+In this section I deal with exploring the data in terms of quality and determine whether any samples need to be removed for downstream analysis.
+
+```{r child = 'exploratory.Rmd'}
+```
+
+## 2. Defining tissue-dependent transcription
+
+In this section I use RNA-seq across tissue sites to explore the tissue-defining transcriptional features. This is done in control participants so as to remove any influence of disease state on gene expression.
+
+```{r child = 'tissues_differential_expression.Rmd'}
+```
+
+## 3. Transcriptional associations in disease
+
+In this section I look at how genes vary in gene expression across the disease groups and how these map on to the previously defined tissue-defining clusters.
+
+```{r child = 'disease_differential_expression.Rmd'}
+```
+
+## 4. Single cell analysis of GGT1 in the intestinal epithelium
+
+Observing expression of GGT1 in publicly available single cell data from the iluem.
+
+```{r child = 'GSE125970_scrnaseq.Rmd'}
+```
+
+## 5. 16S rRNA analysis of control samples
+
+In this section I look at ASVs and their associated annotations and how they are distributed amongst control (+ve and -ve) samples.
+
+```{r child = 'V3_control_analysis.Rmd'}
+```
+
+## 6. 16S rRNA exploratory analysis
+
+Here I look at various high-level analyses and visualisations of the microbiome data including alpha and beta diversity.
+
+```{r child = 'V3_exploratory_analysis.Rmd'}
+
+## 7. 16S rRNA differential abundance testing
+
+This is a DESeq2 differential abundance testing of genera across disease status.
+
+```{r child = 'V3_differential_abundance.Rmd'}
+```
+
+## 7. Compare host transcription and genus abundance
+
+This is an analysis to look at whether there are any correlations between the abundance of bacteria and host transcription at each of the tissue locations and how tissues relate to each other.
+
+```{r child = 'compare_rnaseq_microbiome.Rmd'}
+```
+
+## 8. Compare host transcription and genus abundance - non-zero only
+
+Given the potential for CLR-transformed zero counts giving suprious correlations, in this section I only use non-zero values for correlation analyses.
+
+```{r child = 'compare_rnaseq_microbiome_zero_adjustment.Rmd'}
+```

@@ -1,0 +1,5 @@
+code	scount	stotal	spercent	bcount	btotal	bpercent	ratio	pvalue	pover	punder	goid	category	description	fdr
+-	29	169	17.16	4148	12995	31.92	 0.54	9.7089e-06	1.0000e+00	9.7089e-06	Cluster 1	Tissue.clusters	Cluster 1	0.000012
+-	10	169	 5.92	3081	12995	23.71	 0.25	4.7197e-10	1.0000e+00	4.7197e-10	Cluster 2	Tissue.clusters	Cluster 2	0.000000
+-	15	169	 8.88	2849	12995	21.92	 0.40	5.1608e-06	1.0000e+00	5.1608e-06	Cluster 3	Tissue.clusters	Cluster 3	0.000009
++	104	169	61.54	1614	12995	12.42	 4.95	5.1052e-52	5.1052e-52	1.0000e+00	Cluster 4	Tissue.clusters	Cluster 4	0.000000

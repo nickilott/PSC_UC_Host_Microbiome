@@ -1,0 +1,943 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Data analysis {.tabset .tabset-pills}
+
+### Overview
+
+Having observed in the previous section that there appears to be an influence of zeros on the correlations between bacterial abundances and host modules I am now taking two different but potentially complimentary approaches to explore host-microbiome associations:
+
+1) Look at correlations only where there is non-zero microbial abundance data
+2) re-code each genus as present/absent (or at least very low) and see if there are any significantly differentially abundant host modules between these two groups.
+
+
+```{r setup.compare.zeros, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+# knitr::opts_chunk$set(fig.pos = 'H')
+knitr::opts_knit$set(root.dir = "../")
+```
+
+```{r load.libraries.compare.zeros, echo=FALSE, message=FALSE}
+#library(WGCNA)
+library(edgeR)
+library(ALDEx2)
+library(psych)
+library(ggpubr)
+library(dplyr)
+library(gridExtra)
+library(limma)
+library(goseq)
+library(GenomicFeatures)
+library(plyr)
+library(futile.logger)
+library(igraph)
+library(sva)
+library(RColorBrewer)
+library(reshape)
+library(ComplexHeatmap)
+source("R/pathways_helper.R")
+source("R/ocms_clr.R")
+source("R/relab.R")
+source("R/deseq2_helper.R")
+source("R/correlate.R")
+source("R/runWGCNA.R")
+source("R/getGeneLengths.R")
+source("R/presenceAbsenceWilcox.R")
+source("R/runPathwayEnrichment.R")
+source("sva-devel/R/ComBat_seq.R")
+source("sva-devel/R/helper_seq.R")
+
+# cluster colors
+cluster.colors <- brewer.pal(5, "Set3")
+names(cluster.colors) <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster 5")
+
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+
+if(!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+```
+
+```{r read.genus.compare.zeros, echo=FALSE, message=FALSE}
+
+# read metadata
+micro.meta <- read.csv("metadata/metadata_microbiome_filtered.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+micro.meta$sample <- micro.meta$Code
+rownames(micro.meta) <- micro.meta$sample
+
+# read genus counts
+genus.counts <- read.csv("counts/genus_abundance.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+genus.counts <- genus.counts[,colSums(genus.counts) >= 10000]
+
+# filter counts matrix based on samples that are in the metadata
+genus.counts <- genus.counts[,micro.meta$Code]
+genus.relab <- relab(genus.counts)
+```
+
+
+```{r read.rnaseq.compare.zeros, echo=FALSE, message=FALSE}
+
+# read metadata
+rna.meta <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(rna.meta) <- rna.meta$Code
+rna.meta$sample <- rna.meta$Code
+rna.meta$group <- paste0(rna.meta$Tissue.location, rna.meta$Disease)
+
+# read RNAseq counts
+rna.counts <- read.csv("counts/genes.tsv.gz", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+colnames(rna.counts) <- gsub(".hisat", "", colnames(rna.counts))
+
+# colnames of mat need reformatting
+colnames(rna.counts) <- gsub("_.*", "",colnames(rna.counts))
+
+# filter counts matrix based on samples that are in the metadata
+rna.counts <- rna.counts[,rna.meta$Code]
+```
+
+```{r map.ids.compare.zeros, echo=FALSE, message=FALSE}
+
+# map the ids from the RNA-seq data with the microbiome data
+# generate id2patient
+# get common patient IDs
+
+# read microbiome metadata
+micro.meta <- read.csv("metadata/metadata_microbiome_filtered.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+micro.meta$sample <- micro.meta$Code
+rownames(micro.meta) <- micro.meta$sample
+
+# read rna-seq metadata
+rna.meta <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(rna.meta) <- rna.meta$Code
+rna.meta$sample <- rna.meta$Code
+rna.meta$group <- paste0(rna.meta$Tissue.location, rna.meta$Disease)
+
+ileum.all <- intersect(micro.meta$Patient.ID[micro.meta$Tissue.location == "Ileum"], rna.meta$Patient.ID[rna.meta$Tissue.location == "Ileum"])
+
+# It's been quite difficult to match these up so will have a look up table
+micro.id2patient.ileum <- micro.meta[micro.meta$Patient.ID %in% ileum.all & micro.meta$Tissue.location == "Ileum",]
+micro.id2patient.ileum <- data.frame(micro.id=micro.id2patient.ileum$Code, patient=micro.id2patient.ileum$Patient.ID)
+
+rna.id2patient.ileum <- rna.meta[rna.meta$Patient.ID %in% ileum.all & rna.meta$Tissue.location == "Ileum",]
+rna.id2patient.ileum <- data.frame(rna.id=rna.id2patient.ileum$Code, patient=rna.id2patient.ileum$Patient.ID)
+
+id2patient.ileum <- merge(micro.id2patient.ileum, rna.id2patient.ileum, by="patient")
+id2patient.ileum$Disease <- micro.meta[as.character(id2patient.ileum$micro.id),]$Disease
+
+id2patient.ileum$patient <- as.character(id2patient.ileum$patient) 
+id2patient.ileum$micro.id <- as.character(id2patient.ileum$micro.id) 
+id2patient.ileum$rna.id <- as.character(id2patient.ileum$rna.id) 
+
+```
+
+```{r map.ids.caecum.zeros, echo=FALSE, message=FALSE}
+
+# map the ids from the RNA-seq data with the microbiome data
+# generate id2patient
+# get common patient IDs
+
+# read microbiome metadata
+micro.meta <- read.csv("metadata/metadata_microbiome_filtered.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+micro.meta$sample <- micro.meta$Code
+rownames(micro.meta) <- micro.meta$sample
+
+# read rna-seq metadata
+rna.meta <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(rna.meta) <- rna.meta$Code
+rna.meta$sample <- rna.meta$Code
+rna.meta$group <- paste0(rna.meta$Tissue.location, rna.meta$Disease)
+
+caecum.all <- intersect(micro.meta$Patient.ID[micro.meta$Tissue.location == "Caecum"], rna.meta$Patient.ID[rna.meta$Tissue.location == "Caecum"])
+
+# It's been quite difficult to match these up so will have a look up table
+micro.id2patient.caecum <- micro.meta[micro.meta$Patient.ID %in% caecum.all & micro.meta$Tissue.location == "Caecum",]
+micro.id2patient.caecum <- data.frame(micro.id=micro.id2patient.caecum$Code, patient=micro.id2patient.caecum$Patient.ID)
+
+rna.id2patient.caecum <- rna.meta[rna.meta$Patient.ID %in% caecum.all & rna.meta$Tissue.location == "Caecum",]
+rna.id2patient.caecum <- data.frame(rna.id=rna.id2patient.caecum$Code, patient=rna.id2patient.caecum$Patient.ID)
+
+id2patient.caecum <- merge(micro.id2patient.caecum, rna.id2patient.caecum, by="patient")
+id2patient.caecum$Disease <- micro.meta[as.character(id2patient.caecum$micro.id),]$Disease
+
+id2patient.caecum$patient <- as.character(id2patient.caecum$patient) 
+id2patient.caecum$micro.id <- as.character(id2patient.caecum$micro.id) 
+id2patient.caecum$rna.id <- as.character(id2patient.caecum$rna.id) 
+
+```
+
+```{r map.ids.rectum.compare.zeros, echo=FALSE, message=FALSE}
+
+# map the ids from the RNA-seq data with the microbiome data
+# generate id2patient
+# get common patient IDs
+
+# read microbiome metadata
+micro.meta <- read.csv("metadata/metadata_microbiome_filtered.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+micro.meta$sample <- micro.meta$Code
+rownames(micro.meta) <- micro.meta$sample
+
+# read rna-seq metadata
+rna.meta <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(rna.meta) <- rna.meta$Code
+rna.meta$sample <- rna.meta$Code
+rna.meta$group <- paste0(rna.meta$Tissue.location, rna.meta$Disease)
+
+rectum.all <- intersect(micro.meta$Patient.ID[micro.meta$Tissue.location == "Rectum"], rna.meta$Patient.ID[rna.meta$Tissue.location == "Rectum"])
+
+# It's been quite difficult to match these up so will have a look up table
+micro.id2patient.rectum <- micro.meta[micro.meta$Patient.ID %in% rectum.all & micro.meta$Tissue.location == "Rectum",]
+micro.id2patient.rectum <- data.frame(micro.id=micro.id2patient.rectum$Code, patient=micro.id2patient.rectum$Patient.ID)
+
+rna.id2patient.rectum <- rna.meta[rna.meta$Patient.ID %in% rectum.all & rna.meta$Tissue.location == "Rectum",]
+rna.id2patient.rectum <- data.frame(rna.id=rna.id2patient.rectum$Code, patient=rna.id2patient.rectum$Patient.ID)
+
+id2patient.rectum <- merge(micro.id2patient.rectum, rna.id2patient.rectum, by="patient")
+id2patient.rectum$Disease <- micro.meta[as.character(id2patient.rectum$micro.id),]$Disease
+
+id2patient.rectum$patient <- as.character(id2patient.rectum$patient) 
+id2patient.rectum$micro.id <- as.character(id2patient.rectum$micro.id) 
+id2patient.rectum$rna.id <- as.character(id2patient.rectum$rna.id) 
+
+```
+
+### Zero counts across tissues
+
+Here I show the distribution of zeros for each of the datasets to display the need for alternative approaches.
+
+```{r zero.dists, echo=FALSE, message=FALSE, fig.height=5, fig.width=5}
+genus.ileum.counts <- genus.ileum.counts[rowSums(genus.ileum.counts) != 0,]
+genus.caecum.counts <- genus.caecum.counts[rowSums(genus.caecum.counts) != 0,]
+genus.rectum.counts <- genus.rectum.counts[rowSums(genus.rectum.counts) != 0,]
+
+nzeros.ileum <- length(genus.ileum.counts[genus.ileum.counts == 0])/(nrow(genus.ileum.counts)*ncol(genus.ileum.counts))
+nzeros.caecum <- length(genus.caecum.counts[genus.caecum.counts == 0])/(nrow(genus.caecum.counts)*ncol(genus.caecum.counts))
+nzeros.rectum <- length(genus.rectum.counts[genus.rectum.counts == 0])/(nrow(genus.rectum.counts)*ncol(genus.rectum.counts))
+
+zeros.tp <- melt(data.frame(Ileum = nzeros.ileum,
+                            Caecum = nzeros.caecum,
+                            Rectum = nzeros.rectum))
+
+p.zeros <- ggplot(zeros.tp, aes(x=variable, y=value, fill=variable)) + 
+  geom_bar(stat="identity") +
+  theme_bw() +
+  xlab("") +
+  ylab("Fraction zero") +
+  ylim(c(0,1)) +
+  scale_fill_manual(values=tissue.colours)
+
+p.zeros
+ggsave("export.dir/nzeros.pdf", plot=p.zeros, height=5, width=5)
+
+
+```
+```{r heatmap.zeros, echo=FALSE, messsage=FALSE, fig.height=5, fig.width=5}
+
+genus.ileum.bin <- genus.ileum.counts
+genus.ileum.bin[genus.ileum.bin > 0] <- 1
+
+genus.caecum.bin <- genus.caecum.counts
+genus.caecum.bin[genus.caecum.bin > 0] <- 1
+
+genus.rectum.bin <- genus.rectum.counts
+genus.rectum.bin[genus.rectum.bin > 0] <- 1
+
+# use genera present in all three tissues
+int.genera <- intersect(intersect(rownames(genus.ileum.bin), rownames(genus.caecum.bin)), rownames(genus.rectum.bin))
+
+h.ileum <- Heatmap(genus.ileum.bin[int.genera,], show_row_names=FALSE, col=c("white", tissue.colours[[1]]), border = "black", column_title="Ileum", show_column_names=FALSE)
+h.caecum <- Heatmap(genus.caecum.bin[int.genera,], show_row_names=FALSE, col=c("white", tissue.colours[[2]]), border="black", column_title="Caecum", show_column_names = FALSE)
+h.rectum <- Heatmap(genus.rectum.bin[int.genera,], show_row_names=FALSE, col=c("white", tissue.colours[[3]]), border="black", column_title="Rectum", show_column_names=FALSE)
+
+ht <- h.ileum + h.caecum + h.rectum
+
+pdf("export.dir/heatmap_zeros.pdf", height=5, width=5)
+draw(ht)
+dev.off()
+```
+
+
+
+### Ileum WGCNA
+
+The number of clusters discovered and the number of genes each cluster in the ileum is shown below:
+
+```{r ileum.wgcna.compare.zeros, echo=FALSE, message=FALSE}
+set.seed(10)
+
+# get ileum data
+ileum.meta <- rna.meta[rna.meta$Tissue.location == "Ileum",]
+ileum.counts <- rna.counts[,ileum.meta$sample]
+
+# remove low counts
+ileum.counts <- ileum.counts[rowSums(ileum.counts > 0) >=9, ]
+
+# use combat-seq to remove effects of genes and keep
+# count data
+ileum.rm <- ComBat_seq(as.matrix(ileum.counts), ileum.meta$Disease)
+
+# get the cpm
+ileum.cpm.rm <- log2cpm(ileum.rm)
+
+# scale data before WGCNA
+ileum.cpm.rm.s <- data.frame(t(apply(ileum.cpm.rm, 1, scale)))
+colnames(ileum.cpm.rm.s) <- colnames(ileum.cpm.rm)
+
+# conflicts with WGCNA::cor and stats::cor
+cor <- WGCNA::cor
+
+if (!(file.exists("export.dir/ileum_net.RData"))){
+   wgcna.res.ileum <- runWGCNA(ileum.cpm.rm.s, ileum.meta, regress=FALSE)
+   save(wgcna.res.ileum, file="export.dir/ileum_net.RData")
+   }
+ileum.net <- load("export.dir/ileum_net.RData")
+
+cor <- stats::cor
+
+knitr::kable(data.frame(table(wgcna.res.ileum[[2]]$colors)))
+```
+
+
+#### GO biological pathway enrichment
+
+The next step in the analysis is to look at whether there is enrichment of GO biological pathways in the modules in order to get a sense of biological cohesiveness within wach cluster. This will form the basis of deriving host-microbiome correlations. Pathways that are significantly associated with each co-expression module are shown below.
+
+```{r ileum.gobp.compare.zeros, echo=FALSE, message=FALSE}
+
+ileum.modules <- data.frame(wgcna.res.ileum[[2]]$colors)
+colnames(ileum.modules) <- "Module"
+
+modules.to.test <- unique(ileum.modules$Module)
+
+ileum.pathways <- list()
+
+# need gene lengths
+gene_lengths <- getGeneLengths("annotations/geneset_all.gtf.gz")
+
+for (i in 1:length(modules.to.test)){
+  module <- modules.to.test[i]
+  foreground <- rownames(ileum.modules)[ileum.modules$Module == module]
+  background <- rownames(ileum.modules)[ileum.modules$Module != module]
+  gobp.res <- runPathwayEnrichment(background, foreground, bias.data=gene_lengths)
+  ileum.pathways[[i]] <- gobp.res
+}
+names(ileum.pathways) <- modules.to.test
+
+ileum.pathways.sig <- list()
+for (i in 1:length(ileum.pathways)){
+  cat(paste0("Module ", names(ileum.pathways)[i]), "\n")
+  dat <- ileum.pathways[[i]]
+  sig <- dat[dat$over_represented_fdr < 0.05,]
+  if (nrow(na.omit(sig)) == 0){next}
+  sig <- sig[1:10,]
+  sig$Module <- rep(paste0("ME", names(ileum.pathways)[i]), 10)
+  sig$Module.name <- paste0(sig$Module, ": ", dat$term[1])
+  ileum.pathways.sig[[i]] <- sig
+  knitr::kable(sig)
+}
+```
+
+#### Host-microbiome network
+
+The next stage of the analysis is to try and correlate microbiome data with module eigengenes. This is visualised as a network that will be looked at in more detail later.
+
+```{r filter.mes.compare.zeros, echo=FALSE, message=FALSE}
+
+# filter out ME0 = no cluster
+mes.ileum <- data.frame(t(wgcna.res.ileum[[2]]$MEs))
+mes.ileum <- mes.ileum[,id2patient.ileum$rna.id]
+mes.ileum <- mes.ileum[rownames(mes.ileum) != "ME0",]
+```
+
+
+```{r filter.microbiome.compare.zeros, echo=FALSE, message=FALSE}
+
+# get ileum counts
+genus.ileum.counts <- genus.counts[,id2patient.ileum$micro.id]
+micro.ileum.meta <- micro.meta[colnames(genus.ileum.counts),]
+
+# use combat-seq to remove the effect of Disease
+genus.ileum.counts.rm <- ComBat_seq(as.matrix(genus.ileum.counts), batch=micro.ileum.meta$Disease)
+
+# get rid of rows that are all zero
+genus.ileum.counts.rm <- genus.ileum.counts.rm[rowSums(genus.ileum.counts.rm) != 0,]
+
+# store where zeros are
+na.ileum <- genus.ileum.counts.rm
+na.ileum[na.ileum == 0] <- NA
+
+# re-do the clr calculation as now have batch effect removed
+genus.ileum.clr <- aldex.clr(genus.ileum.counts.rm)
+clr_instance <- lapply(ALDEx2::getMonteCarloInstances(genus.ileum.clr),
+                               function(m){t(apply(m,1,median))})
+## samples in columns
+genus.ileum.clr <- data.frame(matrix(unlist(clr_instance),
+                     ncol = length(clr_instance),
+                     byrow = FALSE,
+                     dimnames = list(colnames(clr_instance[[1]]),
+                                     names(clr_instance))),
+                      stringsAsFactors=FALSE)
+
+
+```
+
+
+```{r correlate.microbiome.mes.compare.zeros, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+
+# change ileum rna ids to microbiome ids at this point
+rownames(id2patient.ileum) <- id2patient.ileum$micro.id
+colnames(genus.ileum.clr) <- id2patient.ileum[colnames(genus.ileum.clr),]$rna.id
+
+ileum.ids <- intersect(colnames(mes.ileum), colnames(genus.ileum.clr))
+
+# filter nased on common ids
+mes.ileum <- mes.ileum[,ileum.ids]
+genus.ileum.clr <- genus.ileum.clr[,ileum.ids]
+
+# make NAs at this point
+genus.ileum.clr[is.na(na.ileum)] <- NA 
+
+all.ileum <- bind_rows(genus.ileum.clr, mes.ileum)
+rownames(all.ileum) <- c(rownames(genus.ileum.clr), rownames(mes.ileum))
+
+# remove genera that are NA
+all.ileum <- all.ileum[grep("g__NA", rownames(all.ileum), invert=TRUE),]
+
+# run correlations
+cors.ileum <- corr.test(t(all.ileum), method="pearson", adjust="BH")
+
+# get corr and padj matrices and make triangular - adjusted p-values are in the upper-right
+# triangle for corr.test
+cors.ileum.subset <- as.matrix(cors.ileum$r)
+p.ileum.subset <- as.matrix(cors.ileum$p)
+p.ileum.subset[is.na(p.ileum.subset)] <- 1
+
+cors.ileum.subset[p.ileum.subset > 0.05] <- 0
+
+# just keeping upper triangle so make lower 0
+cors.ileum.subset[lower.tri(cors.ileum.subset)] <- 0
+
+rownames(cors.ileum.subset) <- gsub(".*g__", "", rownames(cors.ileum.subset))
+colnames(cors.ileum.subset) <- gsub(".*g__", "", colnames(cors.ileum.subset))
+
+# was having trouble with RStudio crashing and so read this in here
+#cors.ileum.subset <- read.csv("export.dir/ileum_mod_cors.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+
+# build network
+n.ileum <- graph_from_adjacency_matrix(as.matrix(cors.ileum.subset), weighted=TRUE, mode="undirected", diag=FALSE)
+n.ileum <- igraph::simplify(n.ileum, remove.multiple = F, remove.loops = T)
+
+# delete negative edges
+n.ileum <- delete.edges(n.ileum, which((E(n.ileum)$weight) < 0))
+
+# delete vertices with no neighbours
+n.ileum <- delete.vertices(n.ileum, which(degree(n.ileum)<1))
+
+# add types for labelling
+annotation.type <- ifelse(grepl("ME", names(V(n.ileum))), "square", "circle")
+annotation.sizes <- ifelse(grepl("ME", names(V(n.ileum))), 8, 6)
+
+# annotation mappings
+annotation.id <- c()
+annotation.label <- c()
+for (i in ileum.pathways.sig){
+  id <- unique(i$Module)
+  description <- i$Module.name[1]
+  annotation.id <- append(annotation.id, id)
+  annotation.label <- append(annotation.label, description)
+}
+
+annotation.mes <- data.frame(id=annotation.id, description=annotation.label)
+rownames(annotation.mes) <- annotation.mes$id
+
+# add size of edges based on correlations
+E(n.ileum)$width <-abs(E(n.ileum)$weight)
+
+# change labels
+vertex.labels <- ifelse(names(V(n.ileum)) %in% annotation.mes$id, as.character(annotation.mes[names(V(n.ileum)),]$description), gsub(".*;g__", "", names(V(n.ileum))))
+
+# try with just the OXPHOS and escherichia labeled
+#vertex.labels <- ifelse(vertex.labels != "Escherichia Shigella" & vertex.labels != "ME15: oxidative phosphorylation", NA, vertex.labels)
+
+ceb <-cluster_fast_greedy(n.ileum)
+V(n.ileum)$community <- ceb$membership
+clrs <- brewer.pal(n=10, "Set3")
+membership.colours <- clrs[ceb$membership]
+
+set.seed(10)
+#pdf("export.dir/ileum_network_zeros.pdf", height=7, width=7)
+igraph::plot.igraph(n.ileum,
+                    vertex.label=vertex.labels,
+                    vertex.label.color="black",
+                    vertex.label.family="Helvetica",
+                    vertex.color=membership.colours,
+                    vertex.label.dist=0,
+                    vertex.shape=annotation.type,
+                    vertex.size=annotation.sizes,
+                    edge.curved=0.1,
+                    layout=layout_with_fr,
+                    )
+#dev.off()
+
+```
+
+
+### Caecum WGCNA
+
+First I remove the effect of disease on gene expression profiles using limma::removeBatchEffect. This is then passed on to WGCNA for the clustering analysis. The number of clusters discovered and the number of genes each cluster in the ileum is shown below:
+
+
+```{r caecum.wgcna.compare.zeros, echo=FALSE, message=FALSE}
+set.seed(10)
+
+# get caecum data
+caecum.meta <- rna.meta[rna.meta$Tissue.location == "Caecum",]
+caecum.counts <- rna.counts[,caecum.meta$sample]
+
+# remove low counts
+caecum.counts <- caecum.counts[rowSums(caecum.counts > 0) >=9, ]
+
+# use combat-seq to remove effects of genes and keep
+# count data
+caecum.rm <- ComBat_seq(as.matrix(caecum.counts), caecum.meta$Disease)
+
+# get the cpm
+caecum.cpm.rm <- log2cpm(caecum.rm)
+
+# scale data before WGCNA
+caecum.cpm.rm.s <- data.frame(t(apply(caecum.cpm.rm, 1, scale)))
+colnames(caecum.cpm.rm.s) <- colnames(caecum.cpm.rm)
+
+# conflicts with WGCNA::cor and stats::cor
+cor <- WGCNA::cor
+
+if (!(file.exists("export.dir/caecum_net.RData"))){
+   wgcna.res.caecum <- runWGCNA(caecum.cpm.rm.s, caecum.meta, regress=FALSE)
+   save(wgcna.res.caecum, file="export.dir/caecum_net.RData")
+   }
+caecum.net <- load("export.dir/caecum_net.RData")
+
+cor <- stats::cor
+
+knitr::kable(data.frame(table(wgcna.res.caecum[[2]]$colors)))
+```
+
+
+#### GO biological pathway enrichment
+
+The next step in the analysis is to look at whether there is enrichment of GO biological pathways in the modules in order to get a sense of biological cohesiveness within wach cluster. This will form the basis of deriving host-microbiome correlations. Pathways that are significantly associated with each co-expression module are shown below.
+
+```{r caecum.gobp.compare.zeros, echo=FALSE, message=FALSE}
+
+caecum.modules <- data.frame(wgcna.res.caecum[[2]]$colors)
+colnames(caecum.modules) <- "Module"
+
+modules.to.test <- unique(caecum.modules$Module)
+
+caecum.pathways <- list()
+
+# need gene lengths
+gene_lengths <- getGeneLengths("annotations/geneset_all.gtf.gz")
+
+for (i in 1:length(modules.to.test)){
+  module <- modules.to.test[i]
+  foreground <- rownames(caecum.modules)[caecum.modules$Module == module]
+  background <- rownames(caecum.modules)[caecum.modules$Module != module]
+  gobp.res <- runPathwayEnrichment(background, foreground, bias.data=gene_lengths)
+  caecum.pathways[[i]] <- gobp.res
+}
+names(caecum.pathways) <- modules.to.test
+
+caecum.pathways.sig <- list()
+for (i in 1:length(caecum.pathways)){
+  cat(paste0("Module ", names(caecum.pathways)[i]), "\n")
+  dat <- caecum.pathways[[i]]
+  sig <- dat[dat$over_represented_fdr < 0.05,]
+  if (nrow(na.omit(sig)) == 0){next}
+  sig <- sig[1:10,]
+  sig$Module <- rep(paste0("ME", names(caecum.pathways)[i]), 10)
+  sig$Module.name <- paste0(sig$Module, ": ", dat$term[1])
+  caecum.pathways.sig[[i]] <- sig
+  knitr::kable(sig)
+}
+```
+
+#### Host-microbe correlations
+
+```{r filter.mes.caecum.zeros, echo=FALSE, message=FALSE}
+
+mes.caecum <- data.frame(t(wgcna.res.caecum[[2]]$MEs))
+mes.caecum <- mes.caecum[,id2patient.caecum$rna.id]
+mes.caecum <- mes.caecum[rownames(mes.caecum) != "ME0",]
+```
+
+
+```{r filter.microbiome.caecum.zeros, echo=FALSE, message=FALSE}
+
+# get caecum counts
+genus.caecum.counts <- genus.counts[,id2patient.caecum$micro.id]
+micro.caecum.meta <- micro.meta[colnames(genus.caecum.counts),]
+
+# use combat-seq to remove the effect of Disease
+genus.caecum.counts.rm <- ComBat_seq(as.matrix(genus.caecum.counts), batch=micro.caecum.meta$Disease)
+
+# get rid of rows that are all zero
+genus.caecum.counts.rm <- genus.caecum.counts.rm[rowSums(genus.caecum.counts.rm) != 0,]
+
+# store where zeros are
+na.caecum <- genus.caecum.counts.rm
+na.caecum[na.caecum == 0] <- NA
+
+# re-do the clr calculation as now have batch effect removed
+genus.caecum.clr <- aldex.clr(genus.caecum.counts.rm)
+clr_instance <- lapply(ALDEx2::getMonteCarloInstances(genus.caecum.clr),
+                               function(m){t(apply(m,1,median))})
+## samples in columns
+genus.caecum.clr <- data.frame(matrix(unlist(clr_instance),
+                     ncol = length(clr_instance),
+                     byrow = FALSE,
+                     dimnames = list(colnames(clr_instance[[1]]),
+                                     names(clr_instance))),
+                      stringsAsFactors=FALSE)
+
+
+```
+
+
+```{r correlate.microbiome.mes.cecum.zeros, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+
+# change caecum rna ids to microbiome ids at this point
+rownames(id2patient.caecum) <- id2patient.caecum$micro.id
+colnames(genus.caecum.clr) <- id2patient.caecum[colnames(genus.caecum.clr),]$rna.id
+
+caecum.ids <- intersect(colnames(mes.caecum), colnames(genus.caecum.clr))
+
+# filter nased on common ids
+mes.caecum <- mes.caecum[,caecum.ids]
+genus.caecum.clr <- genus.caecum.clr[,caecum.ids]
+
+# make NAs at this point
+na.caecum <- na.caecum[rownames(genus.caecum.clr),]
+genus.caecum.clr[is.na(na.caecum)] <- NA
+
+all.caecum <- bind_rows(genus.caecum.clr, mes.caecum)
+rownames(all.caecum) <- c(rownames(genus.caecum.clr), rownames(mes.caecum))
+
+# remove genera that are NA
+all.caecum <- all.caecum[grep("g__NA", rownames(all.caecum), invert=TRUE),]
+
+# run correlations
+cors.caecum <- corr.test(t(all.caecum), method="pearson", adjust="BH")
+
+# get corr and padj matrices and make triangular - adjusted p-values are in the upper-right
+# triangle for corr.test
+cors.caecum.subset <- as.matrix(cors.caecum$r)
+p.caecum.subset <- as.matrix(cors.caecum$p)
+p.caecum.subset[is.na(p.caecum.subset)] <- 1
+
+cors.caecum.subset[p.caecum.subset > 0.05] <- 0
+
+# just keeping upper triangle so make lower 0
+cors.caecum.subset[lower.tri(cors.caecum.subset)] <- 0
+
+rownames(cors.caecum.subset) <- gsub(".*g__", "", rownames(cors.caecum.subset))
+colnames(cors.caecum.subset) <- gsub(".*g__", "", colnames(cors.caecum.subset))
+
+# where are the sig bacteria-host correlations
+#ggcorrplot(cors.caecum.subset, type="lower")
+
+# build network
+n.caecum <- graph_from_adjacency_matrix(as.matrix(cors.caecum.subset), weighted=TRUE, mode="undirected", diag=TRUE)
+n.caecum <- igraph::simplify(n.caecum, remove.multiple = F, remove.loops = T)
+
+# delete vertices with no neighbours
+n.caecum <- delete.vertices(n.caecum, which(degree(n.caecum)<1))
+
+# delete negative edges
+n.caecum <- delete.edges(n.caecum, which((E(n.caecum)$weight) < 0))
+
+# add types for labelling
+annotation.type <- ifelse(grepl("ME", names(V(n.caecum))), "square", "circle")
+annotation.sizes <- ifelse(grepl("ME", names(V(n.caecum))), 8, 6)
+
+# annotation mappings
+annotation.id <- c()
+annotation.label <- c()
+for (i in caecum.pathways.sig){
+  id <- unique(i$Module)
+  description <- i$Module.name[1]
+  annotation.id <- append(annotation.id, id)
+  annotation.label <- append(annotation.label, description)
+}
+
+annotation.mes <- data.frame(id=annotation.id, description=annotation.label)
+rownames(annotation.mes) <- annotation.mes$id
+
+# add size of edges based on correlations
+E(n.caecum)$width <-abs(E(n.caecum)$weight)
+
+# change labels
+vertex.labels <- ifelse(names(V(n.caecum)) %in% annotation.mes$id, as.character(annotation.mes[names(V(n.caecum)),]$description), gsub(".*;g__", "", names(V(n.caecum))))
+
+ceb <-cluster_fast_greedy(n.caecum)
+V(n.caecum)$community <- ceb$membership
+clrs <- brewer.pal(n=10, "Set3")
+membership.colours <- clrs[ceb$membership]
+
+set.seed(10)
+#pdf("export.dir/caecum_network_zeros.pdf", height=7, width=7)
+igraph::plot.igraph(n.caecum,
+                    vertex.label=vertex.labels,
+                    vertex.label.color="black",
+                    vertex.label.family="Helvetica",
+                    vertex.color=membership.colours,
+                    vertex.label.dist=0,
+                    vertex.shape=annotation.type,
+                    vertex.size=annotation.sizes,
+                    edge.curved=0.1,
+                    layout=layout_with_fr,
+                    )
+#dev.off()
+
+```
+
+
+### Rectum WGCNA
+
+
+```{r rectum.wgcna.zeros, echo=FALSE, message=FALSE}
+
+set.seed(10)
+
+# get ileum data
+rectum.meta <- rna.meta[rna.meta$Tissue.location == "Rectum",]
+rectum.counts <- rna.counts[,rectum.meta$sample]
+
+# remove low counts
+rectum.counts <- rectum.counts[rowSums(rectum.counts > 0) >=9, ]
+
+# use combat-seq to remove effects of genes and keep
+# count data
+rectum.rm <- ComBat_seq(as.matrix(rectum.counts), rectum.meta$Disease)
+
+# get the cpm
+rectum.cpm.rm <- log2cpm(rectum.rm)
+
+# scale data before WGCNA
+rectum.cpm.rm.s <- data.frame(t(apply(rectum.cpm.rm, 1, scale)))
+colnames(rectum.cpm.rm.s) <- colnames(rectum.cpm.rm)
+
+# conflicts with WGCNA::cor and stats::cor
+cor <- WGCNA::cor
+
+if (!(file.exists("export.dir/rectum_net.RData"))){
+   wgcna.res.rectum <- runWGCNA(rectum.cpm.rm.s, rectum.meta, regress=FALSE)
+   save(wgcna.res.rectum, file="export.dir/rectum_net.RData")
+   }
+rectum.net <- load("export.dir/rectum_net.RData")
+
+cor <- stats::cor
+
+knitr::kable(data.frame(table(wgcna.res.rectum[[2]]$colors)))
+```
+
+
+#### GO biological pathways enrichment
+
+The next step in the analysis is to look at whether there is enrichment of GO biological pathways in the modules in order to get a sense of biological cohesiveness within wach cluster. This will form the basis of deriving host-microbiome correlations. Pathways that are significantly associated with each co-expression module are shown below.
+
+```{r rectum.gobp.compare.zeros, echo=FALSE, message=FALSE}
+
+rectum.modules <- data.frame(wgcna.res.rectum[[2]]$colors)
+colnames(rectum.modules) <- "Module"
+
+modules.to.test <- unique(rectum.modules$Module)
+
+rectum.pathways <- list()
+
+# need gene lengths
+gene_lengths <- getGeneLengths("annotations/geneset_all.gtf.gz")
+
+for (i in 1:length(modules.to.test)){
+  module <- modules.to.test[i]
+  foreground <- rownames(rectum.modules)[rectum.modules$Module == module]
+  background <- rownames(rectum.modules)[rectum.modules$Module != module]
+  gobp.res <- runPathwayEnrichment(background, foreground, bias.data=gene_lengths)
+  rectum.pathways[[i]] <- gobp.res
+}
+names(rectum.pathways) <- modules.to.test
+
+rectum.pathways.sig <- list()
+for (i in 1:length(rectum.pathways)){
+  cat(paste0("Module ", names(rectum.pathways)[i]), "\n")
+  dat <- rectum.pathways[[i]]
+  sig <- dat[dat$over_represented_fdr < 0.05,]
+  if (nrow(na.omit(sig)) == 0){next}
+  sig <- sig[1:10,]
+  sig$Module <- rep(paste0("ME", names(rectum.pathways)[i]), 10)
+  sig$Module.name <- paste0(sig$Module, ": ", dat$term[1])
+  rectum.pathways.sig[[i]] <- sig
+}
+```
+
+#### Host-microbiome correlations
+
+```{r filter.mes.rectum.compare.zeros, echo=FALSE, message=FALSE}
+
+mes.rectum <- data.frame(t(wgcna.res.rectum[[2]]$MEs))
+mes.rectum <- mes.rectum[,id2patient.rectum$rna.id]
+mes.rectum <- mes.rectum[rownames(mes.rectum) != "ME0",]
+```
+
+
+```{r filter.microbiome.rectum.compare.zeros, echo=FALSE, message=FALSE}
+
+# get rectum counts
+genus.rectum.counts <- genus.counts[,id2patient.rectum$micro.id]
+micro.rectum.meta <- micro.meta[colnames(genus.rectum.counts),]
+
+# use combat-seq to remove the effect of Disease
+genus.rectum.counts.rm <- ComBat_seq(as.matrix(genus.rectum.counts), batch=micro.rectum.meta$Disease)
+
+# get rid of rows that are all zero
+genus.rectum.counts.rm <- genus.rectum.counts.rm[rowSums(genus.rectum.counts.rm) != 0,]
+
+# store where zeros are
+na.rectum <- genus.rectum.counts.rm
+na.rectum[na.rectum == 0] <- NA
+
+# re-do the clr calculation as now have batch effect removed
+genus.rectum.clr <- aldex.clr(genus.rectum.counts.rm)
+clr_instance <- lapply(ALDEx2::getMonteCarloInstances(genus.rectum.clr),
+                               function(m){t(apply(m,1,median))})
+## samples in columns
+genus.rectum.clr <- data.frame(matrix(unlist(clr_instance),
+                     ncol = length(clr_instance),
+                     byrow = FALSE,
+                     dimnames = list(colnames(clr_instance[[1]]),
+                                     names(clr_instance))),
+                      stringsAsFactors=FALSE)
+
+
+```
+
+
+```{r correlate.microbiome.mes.rectum.compare.zeros, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+
+# change rectum rna ids to microbiome ids at this point
+rownames(id2patient.rectum) <- id2patient.rectum$micro.id
+colnames(genus.rectum.clr) <- id2patient.rectum[colnames(genus.rectum.clr),]$rna.id
+
+rectum.ids <- intersect(colnames(mes.rectum), colnames(genus.rectum.clr))
+
+# filter nased on common ids
+mes.rectum <- mes.rectum[,rectum.ids]
+genus.rectum.clr <- genus.rectum.clr[,rectum.ids]
+
+# make zeros NA at this point
+genus.rectum.clr[is.na(na.rectum)] <- NA
+
+all.rectum <- bind_rows(genus.rectum.clr, mes.rectum)
+rownames(all.rectum) <- c(rownames(genus.rectum.clr), rownames(mes.rectum))
+
+# remove genera that are NA
+all.rectum <- all.rectum[grep("g__NA", rownames(all.rectum), invert=TRUE),]
+
+# run correlations
+cors.rectum <- corr.test(t(all.rectum), method="pearson", adjust="BH")
+
+# get corr and padj matrices and make triangular - adjusted p-values are in the upper-right
+# triangle for corr.test
+cors.rectum.subset <- as.matrix(cors.rectum$r)
+p.rectum.subset <- as.matrix(cors.rectum$p)
+p.rectum.subset[is.na(p.rectum.subset)] <- 1
+
+cors.rectum.subset[p.rectum.subset > 0.05] <- 0
+
+# just keeping upper triangle so make lower 0
+cors.rectum.subset[lower.tri(cors.rectum.subset)] <- 0
+
+rownames(cors.rectum.subset) <- gsub(".*g__", "", rownames(cors.rectum.subset))
+colnames(cors.rectum.subset) <- gsub(".*g__", "", colnames(cors.rectum.subset))
+
+# build network
+n.rectum <- graph_from_adjacency_matrix(cors.rectum.subset, weighted=TRUE, mode="undirected", diag=TRUE)
+n.rectum <- igraph::simplify(n.rectum, remove.multiple = F, remove.loops = T)
+
+# delete vertices with no neighbours
+n.rectum <- delete.vertices(n.rectum, which(degree(n.rectum)<1))
+
+# add types for labelling
+annotation.type <- ifelse(grepl("ME", names(V(n.rectum))), "square", "circle")
+annotation.sizes <- ifelse(grepl("ME", names(V(n.rectum))), 8, 6)
+
+# annotation mappings
+annotation.id <- c()
+annotation.label <- c()
+for (i in rectum.pathways.sig){
+  id <- unique(i$Module)
+  description <- i$Module.name[1]
+  annotation.id <- append(annotation.id, id)
+  annotation.label <- append(annotation.label, description)
+}
+
+annotation.mes <- data.frame(id=annotation.id, description=annotation.label)
+rownames(annotation.mes) <- annotation.mes$id
+
+# add size of edges based on correlations
+E(n.rectum)$width <-abs(E(n.rectum)$weight)
+
+# delete negative edges
+n.rectum <- delete.edges(n.rectum, which((E(n.rectum)$weight) < 0))
+
+# change labels
+vertex.labels <- ifelse(names(V(n.rectum)) %in% annotation.mes$id, as.character(annotation.mes[names(V(n.rectum)),]$description), gsub(".*;g__", "", names(V(n.rectum))))
+
+#V(n)$color <- annotation.type
+
+ceb <-cluster_fast_greedy(n.rectum)
+V(n.rectum)$community <- ceb$membership
+clrs <- brewer.pal(n=10, "Set3")
+membership.colours <- clrs[ceb$membership]
+
+set.seed(10)
+#pdf("export.dir/rectum_network_zeros.pdf", height=7, width=7)
+igraph::plot.igraph(n.rectum,
+                    vertex.label=vertex.labels,
+                    vertex.label.color="black",
+                    vertex.label.family="Helvetica",
+                    vertex.color=membership.colours,
+                    vertex.label.dist=0,
+                    vertex.shape=annotation.type,
+                    vertex.size=annotation.sizes,
+                    edge.curved=0.1,
+                    layout=layout_with_fr,
+                    )
+#dev.off()
+
+```
+
+Bacally these netwroks confirm that there are no strong host-microbiome correlations - at least where there is non-zero coverage of bacterial genera.
+
+Following on from this there is still the question of whether low vs high abundance of any given genus is associated with increased or decreased expression of host modules. This may be the case as we saw previously some string correlations that were driven by zeros being present.
+
+
+### Gene expression differences in bacterial presence vs. absence (low) 
+
+In this analysis I iterate over the genus CLR data and code each genus as present vs. absent depending on whether there is a zero count or not. Differential abundance of each module against each bacterium is then tested using Wilcoxon-Rank sum test.
+
+```{r wilcox.presence.absence, echo=FALSE, message=FALSE}
+
+ileum.wilcox <- wilcoxEigengenes(genus.ileum.clr, mes.ileum)
+caecum.wilcox <- wilcoxEigengenes(genus.caecum.clr, mes.caecum)
+rectum.wilcox <- wilcoxEigengenes(genus.rectum.clr, mes.rectum)
+
+```
+
+There were no significant differences in module eigengene expression between bacterial categories coded as present/absent.
+

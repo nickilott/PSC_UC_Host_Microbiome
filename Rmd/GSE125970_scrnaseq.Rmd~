@@ -1,0 +1,360 @@
+
+```{r setup.scrnaseq, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+knitr::opts_knit$set(root.dir="../")
+#knitr::opts_chunk$set(fig.pos = 'H')
+
+
+library(RColorBrewer)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(tidyr)
+library(gridExtra)
+library(pheatmap)
+library(DESeq2)
+#library(umap)
+source("R/deseq2_helper.R")
+source("R/pathways_helper.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+source("R/correlate.R")
+source("R/buildPositivity.R")
+
+set.seed(5)
+
+# define colours here
+tissue.colours <- c(blues9[3], blues9[7], blues9[9])
+names(tissue.colours) <- c("Ileum", "Colon", "Rectum")
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+
+
+```
+
+## Data analyis {.tabset .tabset-pills}
+
+### Overview
+
+These data are available as a publicly available data set (GSE125970) where the authors were looking specifically at differences between the ileum, colon and rectum epithelium usng single cell RNA-seq. They found a number of differences and highlighted differences in nutrient aborption between the different tissue sites. I have found a dataset from this study that looks like each cell has been annotated with it's cluster definition i.e. which type of epithelial cell it is from. This is my starting point for looking at where GGT1 is expressed.
+
+
+```{r make.metadata, echo=FALSE, message=FALSE}
+
+dat <- read.csv("counts/GSE125970_raw_UMIcounts.txt", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+
+# create metadata from sample names
+tissue <- unlist(strsplit(colnames(dat), "_"))
+tissue <- tissue[seq(2,length(tissue),3)]
+tissue <- gsub("\\.[0-9]", "", tissue)
+  
+cell.type <- unlist(strsplit(colnames(dat), "_"))
+cell.type <- cell.type[seq(3,length(cell.type),3)]
+
+metadata <- data.frame(tissue=tissue, cell.type=cell.type)
+rownames(metadata) <- colnames(dat)
+```
+
+```{r normalise.counts, echo=FALSE, message=FALSE}
+cpm <- log2cpm(dat)
+```
+
+### Expression of GGT1 across cell types
+
+Here I am using the defnitions of cell types that were described in the originial study rather than re-analysing the entire data set from scratch. This may give us a general picture of the type of epithelial cells that can express GGT1.
+
+```{r plot.expression, echo=FALSE, message=FALSE, fig.height=3, fig.width=6}
+
+ggt1 <- as.data.frame(cpm["GGT1",])
+metadata$sample <- rownames(metadata)
+metadata$condition <- paste0(metadata$tissue, ":", metadata$cell.type)
+
+plotGeneOfInterest("GSE125970", ggt1, metadata, variable="condition")
+
+```
+
+There are a lot more enterocytes in the ileum and in general the picture above doesn't give a great sense of what is going on. Clearly there is a proportion of each of the cell subsets that is positive for GGT1 and a proportion that are negative. Below I look at the proportion of each cell type that is +ve or -ve for GGT1 to see if there is an overrepresentation in any of the subsets.
+
+```{r proportion.of.ggt1.positive, echo=FALSE, message=FALSE, fig.height=3, fig.width=8}
+
+metadata$cell.type <- as.character(metadata$cell.type)
+
+# get the proportion of subsets at each location
+psubsets <- metadata %>% group_by(tissue) %>% dplyr::count(cell.type) %>% mutate(prop=n/sum(n)*100) %>% arrange(desc(prop)) %>% as.data.frame()
+
+set.seed(5)
+cell.type.colours <- sample(rainbow(s = 0.7, v = 0.5, 20), 7)
+psubsets$tissue <- factor(psubsets$tissue, levels=c("Ileum", "Colon", "Rectum"))
+p.subsets <- ggplot(psubsets, aes(x=tissue, y=prop, fill=cell.type)) + geom_bar(stat="identity") + theme_bw() + scale_fill_manual(values=cell.type.colours) + ylab("% cells")
+ggsave("export.dir/cell_subsets.pdf", plot=p.subsets + theme(axis.text=element_text(size=6)),
+       height=2, width=4)
+
+getProportionPositive <- function(mat, metadata, group="Ileum:Enterocyte"){
+  
+  dat <- mat[,metadata$condition == group]
+  tissue <- gsub(":.*", "", group)
+  total <- ncol(dat)
+  pos <- rowSums(dat > 0)
+  ppos <- (pos/total)*100
+  return(data.frame(cell.type=group,
+                    tissue=tissue,
+                    ppos=ppos))
+  }
+
+tissue.cells <- unique(metadata$condition)
+proportions <- list()
+for (i in tissue.cells){
+  ppos <- getProportionPositive(ggt1, metadata, group=i)
+  proportions[[i]] <- ppos
+}
+proportions <- bind_rows(proportions)
+proportions <- proportions[order(proportions$ppos, decreasing=FALSE),]
+proportions$cell.type <- factor(proportions$cell.type, levels=unique(proportions$cell.type))
+
+p.ggt <- ggplot(proportions, aes(x=cell.type, y=ppos, group=tissue, fill=tissue)) + geom_bar(stat="identity") + theme_bw() + ylab("% GGT1+ cells") + xlab("") + scale_fill_manual(values=tissue.colours) + coord_flip() 
+ggsave("export.dir/ggt_pos.pdf", plot=p.ggt + theme(axis.text=element_text(size=6)), height=2, width=4)
+
+grid.arrange(p.subsets, p.ggt, nrow=1)
+
+kable(proportions)
+```
+
+
+It is clear that GGT1 is predominantly expressed in enterocytes and this is particularly in the ileum - which also has the highest proportion of enterocytes compared with colon and rectum epithelial cells. Given that we have observed higher metabolic expression in the ileum in our own studies and that GGT1 is responsible for ROS removal, I reasoned that GGT1 may be co-expressed with metabolic enzymes that mark metabolically active cells. This would also be the case for things like superoxide dismutase and catalase - these would be expected to be co-expressed with genes involved in OXPHOS. Therefore next I looked at co-expression of nuclear encoded genes of complex I (rate-limiting complex in respiratory transport chain). These would mark metabolically active cells that I predict would also express GGT1.
+
+
+```{r ggt1.rtc, echo=FALSE, message=FALSE}
+
+# rct = respiratory transport chain
+cpm.rct <- cpm[c("NDUFS1",
+                 "NDUFS2",
+                 "NDUFS3",
+                 "NDUFS7",
+                 "NDUFS8",
+                 "NDUFV1",
+                 "NDUFV2",
+                 "NDUFV3", 
+                 "NDUFB1",
+                 "NDUFB2",
+                 "NDUFB3",
+                 "NDUFB4",
+                 "SOD1",
+                 "CAT",
+                 "GGT1",
+                 "NFE2L2"),]
+  
+
+colours <- colorRampPalette(c("blue", "white", "red"))(75)
+col.anno <- metadata[,c("tissue", "cell.type")]
+pheatmap(cpm.rct,
+         scale="row",
+         color=colours,
+         clustering_distance_row="manhattan",
+         clustering_method="ward.D2",
+         show_colnames = FALSE,
+         annotation_col = col.anno)
+dev.off()
+```
+
+There is nothing striking going on here. It is probably better to take a more unbiased approach in this situation although first I will just check whether GGT1 expression is associated with read count as it does seem lowly expressed.
+
+
+### GGT1 expression vs. read count
+
+```{r ggt1.readcount, echo=FALSE, message=FALSE, fig.height=3, fig.width=3}
+
+data.frame(GGT1=unlist(dat["GGT1",]), read.count = unlist(colSums(dat))) %>% ggplot(aes(x=read.count, y=GGT1)) + geom_point() + theme_bw()
+                     
+```
+
+Doesn't seem to be associated with read count.
+
+
+### Total proportion of GGT1+ cells across tissue sites
+
+It is of note that GGT1 is mainly expressed in Enterocytes and enterocytes are predominant in the Ileum. Therefore it is most likely that the total proportion of GGT1+ cells will be highest in the ileum.
+
+```{r total.ggt1.pos, echo=FALSE, message=FALSE, fig.height=3, fi.width=3}
+
+metadata$GGT1 <- ifelse(unlist(dat["GGT1",]) > 0, "GGT1pos", "GGT1neg") 
+
+# get the proportion of subsets at each location
+pggt1pos <- metadata %>% group_by(tissue) %>% dplyr::count(GGT1) %>% mutate(prop=n/sum(n)*100) %>% arrange(desc(prop)) %>% as.data.frame()
+pggt1pos$tissue <- factor(pggt1pos$tissue, levels=c("Ileum", "Colon", "Rectum"))
+
+p.pggt1pos <- ggplot(pggt1pos, aes(x=tissue, y=prop, group=GGT1, fill=GGT1)) + geom_bar(stat="identity") + theme_bw() + scale_fill_manual(values=c("grey", "slategrey"))
+
+ggsave("export.dir/total_ggt1_pos.pdf", plot=p.pggt1pos + theme(axis.text=element_text(size=6)), height=2, width=4)
+
+```
+
+
+### DESeq2 GGT1+ Enterocyte vs. GGT1- Enterocyte
+
+Given that GGT1 predominates in the Enterocytes (true of all three tissues) I thought I would do a differential expression analysis between GGT1+ enterocytes (read count > 0) and GGT1- Enterocytes (read count = 0). This should hopefully give a set of genes that co-vary with GGT1.
+
+```{r deseq, echo=FALSE, message=FALSE}
+
+mat <- dat[, grep("Enterocyte", colnames(dat))]
+metadata.sub <- metadata[colnames(mat),]
+metadata.sub$status <- unlist(mat["GGT1",])
+metadata.sub$status <- ifelse(metadata.sub$status == 0, "GGT1Neg", "GGT1Pos")
+
+if(!(file.exists("export.dir/ggt1pos_ggt1neg.tsv"))){
+   dds <- DESeqDataSetFromMatrix(mat, metadata.sub, design=~status)
+   dds <- DESeq(dds)
+   res <- results(dds)
+   res$gene_id <- rownames(res)
+   write.table(res, file="export.dir/ggt1pos_ggt1neg.tsv", sep="\t", row.names=FALSE)
+}
+
+res <- read.csv("export.dir/ggt1pos_ggt1neg.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+
+ggt1pos.sig <- res[res$pad < 0.05 &!(is.na(res$padj)) & res$log2FoldChange > 0 & !(is.na(res$log2FoldChange)),] %>% arrange(desc(log2FoldChange))
+
+```
+
+### Top 10 significant genes
+
+Below are boxplots of the top 10 most significant genes to see how they look like.
+
+```{r top10.in.ggt1pos, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+
+sig10 <- log2cpm(mat)[ggt1pos.sig$gene_id[1:10],]
+
+plotGeneOfInterest("GGT1pos", sig10, metadata.sub, variable="status")
+
+```
+
+### Pathway enrichment analysis
+
+There were `r nrow(ggt1pos.sig)` significant (padj < 0.05) in GGT1 positive cells vs. negative. I use the GO biological pathways for this.
+
+```{r build.genesets.scrnaseq, echo=FALSE, message=FALSE}
+
+background.ggt1 <- data.frame(gene_id = rownames(mat))
+foreground.ggt1 <- data.frame(gene_id = ggt1pos.sig$gene_id)
+
+write.csv(background.ggt1, file="export.dir/background.ggt1.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+write.csv(foreground.ggt1, file="export.dir/foreground.ggt1.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+
+```
+
+```{r pathways.analysis.scrnaseq, echo=FALSE, message=FALSE}
+
+if (!(file.exists("export.dir/ggt1_pathways.log"))){
+
+statement = "python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground.ggt1.tsv -b export.dir/background.ggt1.tsv --filename-input=../../data/pathway_genesets/c5.bp.v6.1.symbols.tsv -q BH --ontology=GO_BP --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/ggt1_pathways.log"
+
+system(statement)
+}
+
+# Plot the top ten over-represented
+topten <- function(x, method="fdr"){
+  x <- x[x$code == "+",]
+  if (method == "fold"){
+      x <- x[order(x$ratio, decreasing=TRUE),]
+  }
+  else{
+    x <- x[order(x$fdr, decreasing=FALSE),]
+  }
+  x <- x[1:10,]
+  return(x)
+  }
+
+pathway.results <- topten(read.csv("export.dir/GO_BP.foreground.results", header=TRUE, stringsAsFactors=FALSE, sep="\t")) %>% arrange(desc(ratio))
+
+pathways.results$goid <- factor(pathway.results$goid, levels=pathway.results$goid)
+
+p.pathways <- plotPathways(pathway.results, relevel=TRUE, text.size=1.2) + scale_fill_manual(values=rep("slategrey", 10))
+
+ggsave("export.dir/pathways_ggt.pdf", plot=p.pathways + theme(axis.text=element_text(size=6)), height=2, width=2)
+
+p.pathways
+```
+
+Interestingly and slightly different to what I expected based on previous analyses is that ATP biosynthesis pathway is enriched. This is not unexpected as such as this is what I hypothesised based on previous research. It turns out that these are more mitochondrial encoded I think rather than genome-encoded which is maybe why I missed this before. However, I will need to look at the specific genes to seee which ones are co-expressed with GGT1.
+
+
+```{r pathway.genes.scrnaseq, echo=FALSE, message=FALSE}
+
+genesets.bp <- read.csv("../../data/pathway_genesets/c5.bp.v6.1.symbols.tsv", header=FALSE, sep="\t")
+
+geneset.genes <- getGenesetGenes(genesets.bp, "GO_ATP_BIOSYNTHETIC_PROCESS")
+sig.genes <- foreground.ggt1$gene_id
+toplot <- append("GGT1", intersect(geneset.genes, sig.genes))
+cpm.toplot <- log2cpm(mat)[toplot,]
+
+# heatmap
+colours <- colorRampPalette(c("blue", "white", "red"))(75)
+col.anno <- metadata.sub[,c("tissue", "GGT1")]
+
+cpm.toplot <- cpm.toplot[,rownames(metadata.sub)]
+ordered.samples <- colnames(cpm.toplot[,order(cpm.toplot["GGT1",])])
+
+pheatmap(cpm.toplot[,ordered.samples],
+         scale="none",
+         color=colours,
+         cluster_cols = FALSE,
+         clustering_distance_row="manhattan",
+         clustering_method="ward.D2",
+         show_colnames = FALSE,
+         annotation_col = col.anno)
+dev.off()
+
+plotGeneOfInterest("GGT1pos", cpm.toplot, metadata.sub, variable="status") + geom_violin()
+```
+
+It's really not very clear cut at all in terms of differential expression between GGT1pos vs GGT1neg cells. There are so many cells we are comparing that the differences observed are exptremely subtle. It might be worth reporting though as it does fit with what you would expect...
+
+
+
+### Correlate GGT1 expression with all other genes
+
+To find out co-expressed genes with GGT1 I correlate GGT1 expression in GGT1+ cells with all other genes.
+
+```{r ggt1.correlation.scrnaseq, echo=FALSE, message=FALSE}
+
+cpm.ggt1pos <- cpm[,metadata$sample[metadata$GGT1 == "GGT1pos"]]
+
+
+if (!(file.exists("export.dir/ggt1_cors.tsv"))){
+ggt1.cors <- correlateMatrixWithVector(cpm.ggt1pos[grep("GGT1", rownames(cpm.ggt1pos), invert=TRUE),], unlist(cpm.ggt1pos["GGT1",]))
+
+ggt1.cors$gene <- rownames(ggt1.cors)
+write.table(ggt1.cors, file="export.dir/ggt1_cors.tsv", row.names=FALSE, quote=FALSE, sep="\t")
+}
+
+ggt1.cors <- read.csv("export.dir/ggt1_cors.tsv", header=TRUE, stringsAsFactors=FALSE, sep="\t")
+
+sig.cors <- na.omit(ggt1.cors[ggt1.cors$padj < 0.05,])
+
+```
+
+### File for CIBERSORT
+
+In other analyses I have decided that it would be a good idea to look at signatures of the epithelium using cibersort. I'm thinking that the signature of proliferating cells could be an alteration in the relative frequency of TA, stem or progenitor cells in the caecum of PSC/UC and UC patients relative to controls. Here I output a file to build a signature matrix as input into CIBERSORT. This will be CPM values as these are what I will use in my mixtures. I output a separate matrix for each tissue.
+
+```{r output.file.scrnaseq, echo=FALSE, message=FALSE}
+
+dat.ileum <- dat[,which(metadata$tissue == "Ileum")]
+dat.colon <- dat[,which(metadata$tissue == "Colon")]
+dat.rectum <- dat[,which(metadata$tissue == "Rectum")]
+
+dat.ileum <- rbind(metadata$cell.type[metadata$tissue == "Ileum"], dat.ileum)
+dat.colon <- rbind(metadata$cell.type[metadata$tissue == "Colon"], dat.colon)
+dat.rectum <- rbind(metadata$cell.type[metadata$tissue == "Rectum"], dat.rectum)
+
+write.table(data.frame("GeneSymbol" = rownames(dat.ileum), dat.ileum), file="export.dir/ileum_cell_type_signatures.txt", sep="\t", row.names = FALSE, col.names=FALSE, quote=FALSE)
+write.table(data.frame("GeneSymbol" = rownames(dat.colon), dat.colon), file="export.dir/colon_cell_type_signatures.txt", sep="\t", row.names = FALSE, col.names=FALSE, quote=FALSE)
+write.table(data.frame("GeneSymbol" = rownames(dat.rectum), dat.rectum), file="export.dir/rectum_cell_type_signatures.txt", sep="\t", row.names = FALSE, col.names=FALSE, quote=FALSE)
+```
+
+
+
+

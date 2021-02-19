@@ -1,0 +1,48 @@
+name: psc_uc_host_microbiome
+channels:
+  - r
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bioconductor-aldex2=1.18.0=r36_0
+  - bioconductor-complexheatmap=2.2.0
+  - bioconductor-deseq2=1.26.0
+  - bioconductor-edger=3.28.0
+  - bioconductor-fgsea=1.12.0
+  - bioconductor-goseq=1.38.0
+  - bioconductor-limma=3.42.0
+  - bioconductor-org.hs.eg.db=3.10.0
+  - bioconductor-phyloseq=1.30.0
+  - bioconductor-sva=3.34.0
+  - bioconductor-vsn=3.54.0
+  - r-base=3.6.1
+  - r-biocmanager=1.30.10
+  - r-broom-0.5.2
+  - r-data.table=1.12.8
+  - r-dbplyr=1.4.3
+  - r-devtools=2.0.2
+  - r-dt=0.9
+  - r-dynamictreecut=1.63_1
+  - r-ggcorrplot=0.1.3
+  - r-ggplot2=3.2.1
+  - r-ggpubr=0.2.5
+  - r-ggrepel=0.8.2
+  - r-ggsignif=0.6.0
+  - r-gplots=3.0.3
+  - r-gridextra=2.3
+  - r-gtools=3.8.2
+  - r-igraph=1.2.4.1
+  - r-knitr=1.25
+  - r-markdown=1.1
+  - r-pheatmap=1.0.12
+  - r-plyr=1.8.6
+  - r-psych=1.9.12.31
+  - r-rcolorbrewer=1.1_2
+  - r-reshape=0.8.8
+  - r-rmarkdown=1.16
+  - r-tidyr=0.8.3
+  - r-vegan=2.5_6=
+  - r-venndiagram=1.6.20
+  - r-wgcna=1.69
+

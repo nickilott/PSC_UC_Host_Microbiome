@@ -1,0 +1,1136 @@
+---
+title: "Tissue-defining transcriptional signatures"
+header-includes: #allows you to add in your own Latex packages
+- \usepackage{float} #use the 'float' package
+- \floatplacement{figure}{H} #make every figure with caption = h
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    fig_caption: true
+    keep_tex: true
+    latex_engine: pdflatex
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup.deseq.storage, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(eval=TRUE)
+knitr::opts_chunk$set(out.extra = '')
+knitr::opts_knit$set(root.dir="../")
+#knitr::opts_chunk$set(fig.pos = 'H')
+
+library(RColorBrewer)
+
+# set colour mapping here
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+
+# set path for images that have to be created and
+# then pulled back in
+images.dir="images"
+
+if (!(dir.exists(images.dir))){
+    dir.create(images.dir)}
+```
+
+```{r load.libraries, echo=FALSE, message=FALSE}
+library(gplots)
+library(gridExtra)
+library(knitr)
+library(DESeq2)
+library(vsn)
+library(RSQLite)
+library(grid)
+library(gridExtra)
+library(pheatmap)
+library(ggplot2)
+# library(patchwork)
+library(vegan)
+library(pheatmap)
+library(RColorBrewer)
+library(dynamicTreeCut)
+source("R/deseq2_helper.R")
+source("R/kmeans_helper.R")
+source("R/pathways_helper.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+source("R/threewayvenn.R")
+#source("R/deseq2.R")
+source("R/correlate.R")
+library(cluster)
+library(ggrepel)
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+
+# Sys.setenv(SHELL='/bin/bash')
+
+# set seed
+set.seed(5)
+```
+
+In this analysis I explore transcriptional signatures that are associated with each of the tissue sites. The idea was to perform a rather general differential expression analysis in healthy individuals and then perform some sort of clustering analysis to define tissue-defining gene signatures. The aim is really to see if we can see what functional differences there are between intestinal sites and how these may be affected in inflammatory bowel disease.
+
+
+# Analysis overview
+
+In previous analyses we have observed that tissue expression profiles are very different. Particularly in PCA, the Ileum samples cluster away from caecum and rectum on PC1. Rectum and Caecum can be distinguished based on PC3. Therefore, here I perform DESeq2 differential abundance analysis between tissues. This is done in heathy individuals so that there are no influences of disease state on tissue profiles.
+
+## The data set at a glance
+
+This is a summary of the data set that I am working with. I will base some of the filtering steps on the number of samples that I have in each tissue/disease group. Below is a summary of these numbers.
+
+```{r summary.of.numbers, echo=FALSE, message=FALSE}
+metadata <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(metadata) <- metadata$Code
+summary.of.numbers <- data.frame(Tissue=metadata$Tissue.location, Disease=metadata$Disease)
+kable(table(summary.of.numbers))
+
+# Keep just the healthy samples
+metadata <- metadata[metadata$Disease == "HEALTHY",]
+
+metadata$Code <- as.character(metadata$Code)
+
+# add metadata$sample column for plotting purposes later
+metadata$sample <- metadata$Code
+```
+
+The lowest number of samples for any group is 7 PSC/UC individuals in the Rectum. When doing differential expression analysis across tissues I set a threshold of keeping genes that have at least 10 reads in at least 7 individuals. This is so that the definition of tissue-defining signatures can be compared directly when I go on to perform differential expression analysis between diseases and healthy controls.
+
+```{r read.counts, echo=FALSE, message=FALSE}
+
+mat <- read.csv("counts/genes.tsv.gz", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+colnames(mat) <- gsub(".hisat", "", colnames(mat))
+
+# colnames of mat need reformatting
+colnames(mat) <- gsub("_.*", "",colnames(mat))
+
+# filter the matrix (Same filtering that was done for the main analysis - consistent genes analyses in both)
+mat <- filterGenes(mat, k=7, a=10)
+
+# filter counts matrix based on samples that are in the metadata
+mat <- mat[,metadata$Code]
+
+```
+
+# Principle components analysis on healthy samples
+
+I have already performed this analysis during exploration of the data. Here as I am performing tissue differential expression on samples from healthy individuals I remove PSC/UC and UC samples before running the PCA.
+
+```{r pca, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+# get the cpm
+cpm <- log2cpm(mat)
+
+pc <- runPCA(cpm, scale=FALSE)
+
+# plot principle components
+p1 <- plotPrincipleComponents(pc, metadata, colourby="Tissue.location", shapeby="Disease", group="Patient.ID", pcs=c("PC1", "PC2"))
+p1 <- p1 + scale_colour_manual(values=tissue.colours) + geom_path(colour="lightgrey", linetype="dashed")
+ggsave("export.dir/pc1_pc3.pdf", height=7, width=7)
+p1
+```
+
+# Differential expression results
+
+I run the LRT function in DESeq2 in order to define genes that are differentially expressed between any of the tissues. The idea is that genes that show similar patterns of expression across tissues will then be defined into signatures via cluster analysis.
+
+
+## Dispersion estimates
+
+Below is the plot of the dispersion estimates obtained from DESeq2. DESeq2 is run controlling for Patient.ID using the LRT test. The resulting differentially expressed set is therefoer any gene that varies in any way across tissue sites.
+
+```{r differential.expression, echo=FALSE, message=FALSE, fig.height=5, fig.width=6}
+
+####################
+# analysis
+####################
+if (!(file.exists("export.dir/tissue_differences.tsv"))){
+dds <- DESeqDataSetFromMatrix(countData = mat,
+                              colData = metadata,
+                  	      design = ~ Patient.ID + Tissue.location)
+
+
+# get gene names
+featureData <- makeFeatureData("/gfs/mirror/annotations/hg38_ensembl91/csvdb", mat)
+
+# make sure conditions are factors
+dds$Tissue.location <- factor(dds$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+# run analysis
+dds.lrt <- DESeq(dds, test="LRT", fitType="local", reduced=~Patient.ID)
+res <- results(dds.lrt)
+
+png(paste0(images.dir, "/dispersion.png"))
+plotDispEsts(dds.lrt)
+dev.off()
+
+results.table <- getResultsTable(res, featureData)
+
+# output results
+write.table(results.table, file="export.dir/tissue_differences.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+}
+
+results.table <- read.csv("export.dir/tissue_differences.tsv", header=TRUE, sep="\t", stringsAsFactors=FALSE)
+rownames(results.table) <- results.table$gene_id
+nsig <- nrow(results.table[results.table$padj < 0.05 & !(is.na(results.table$padj)),])
+
+```
+
+![](../images/dispersion.png)
+
+
+## Differentially expressed genes
+
+After runnng DESeq2 I found there were `r nsig` significant differences found between the tissues.
+
+## Visualising differences
+
+Here I visualise differences across tissues in a heatmap.
+
+```{r heatmap, echo=FALSE, message=FALSE, fig.height=8, fig.width=5}
+
+sig.genes <- rownames(results.table[results.table$padj < 0.05 & !(is.na(results.table$padj)),])
+
+# use log2 cpm for visualisation
+sig.mat <- log2cpm(mat)[sig.genes,]
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+
+# pdf("export.dir/heatmap_tissue_differences.pdf", height=10, width=7)
+# heatmapMatrixWithSampleAnnotation(sig.mat, sample.annotation = sample.annotation, annotation.colors = annotation.colours, labels = FALSE)
+# dev.off()
+
+# for the report
+heatmapMatrixWithSampleAnnotation(sig.mat, sample.annotation = sample.annotation, annotation.colors = annotation.colours, labels = FALSE)
+
+```
+
+There are a large number of significantly differentially expressed genes across tissue sites. They appear to fall into fairly neat clusters which I will expore in teh next sections.
+
+
+# kmeans analysis
+
+The above shows us how genes vary between any of the tissues. As can be seen from the heatmap there is some very nice clustering by tissue. Although we can visually identify distinct clusters of genes that are differentially expressed between tissues, first we use the elbow method to determine the optimal number of clusters.
+
+## Elbow plot
+
+```{r elbow, fig.height=5, fig.width=7, echo=FALSE, message=FALSE}
+
+elbow.df <- elbow(rowScale(sig.mat), ks=c(1:15))
+
+ggplot(elbow.df, aes(x=k, y=within.var)) + geom_point() + geom_line() + theme_bw()
+
+```
+
+The issue with the above plot is that it is quite a smooth curve and there isn't such a definitive cut-off. I therefore will explore the use of the dynamic tree cut that will use the same parameters for clustering as in the heatmap and may give a suitable defintion for gene clusters.
+
+
+## Dynamic tree cut analysis
+
+Here I use the dynamic tree cutting method to place genes into clusters.
+
+```{r dynamic.tree, echo=FALSE, message=FALSE}
+
+# cluster sig matrix using hclust
+d1 <- dist(rowScale(sig.mat), method="manhattan")
+h1 <- hclust(d1, method="ward.D")
+
+# dynamic cut (hybrid method)
+dynamicCut <- cutreeDynamic(h1, method="hybrid", cutHeight = 30000, distM=as.matrix(d1))
+
+# create data frame with genes and clusters
+clusters.df <- data.frame(Cluster=as.character(dynamicCut))
+rownames(clusters.df) <- h1$label
+
+nclusters <- length(unique(clusters.df$Cluster))
+```
+
+The dynamic tree cutting method identified `r nclusters`. These are annotated on the heatmap.
+
+```{r heatmap.with.clusters, fig.height=10, fig.width=7, echo=FALSE, message=FALSE}
+
+# so many devices are causing me a headache!
+dev.off()
+
+colors <- colorRampPalette(c("blue", "white", "red"))(75)
+row.annotations <- clusters.df
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+# cluster colors
+cluster.colors <- brewer.pal(nclusters, "Set3")
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]),
+                           "Cluster" = c("1" = cluster.colors[1], "2" = cluster.colors[2], "3" = cluster.colors[3], "4" = cluster.colors[4], "5" = cluster.colors[5]))
+
+png(paste0(images.dir, "/heatmap_with_clusters.png"), height=3, width=3, units="in", res=500)
+pheatmap(sig.mat, color = colors, scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, annotation_row = row.annotations, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=FALSE, show_colnames=FALSE) 
+dev.off()
+```
+
+![](../images/heatmap_with_clusters.png)
+
+
+These 5 clusters look to represent the data pretty well - at least by eye. I will use these clusters to perform pathways analysis.
+
+
+```{r output.gene.lists, echo=FALSE, message=FALSE}
+
+background <- data.frame(gene_name=results.table$gene_name, gene_id=results.table$gene_id)
+rownames(background) <- background$gene_id
+background$gene_id <- as.character(background$gene_id)
+background$gene_name <- as.character(background$gene_name)
+
+# use the background set to get the foreground sets
+foreground <- matrix(ncol=6, nrow=nrow(background))
+
+clusters.df$gene <- rownames(clusters.df)
+c1.genes <- clusters.df[clusters.df$Cluster == "1",]$gene
+c2.genes <- clusters.df[clusters.df$Cluster == "2",]$gene
+c3.genes <- clusters.df[clusters.df$Cluster == "3",]$gene
+c4.genes <- clusters.df[clusters.df$Cluster == "4",]$gene
+c5.genes <- clusters.df[clusters.df$Cluster == "5",]$gene
+
+for (i in 1:nrow(background)){
+  gene.id <- background[i,]$gene_id
+  gene.name <- background[i,]$gene_name
+  
+  foreground[i,6] <- gene.name
+  
+  if (gene.id %in% c1.genes){
+    foreground[i,1] <- 1
+  }
+  else if (gene.id %in% c2.genes){
+    foreground[i,2] <- 1
+  }
+  else if (gene.id %in% c3.genes){
+    foreground[i,3] <- 1
+  }
+  else if (gene.id %in% c4.genes){
+    foreground[i,4] <- 1
+  }
+  else if (gene.id %in% c5.genes){
+    foreground[i,5] <- 1
+  }
+}
+foreground[is.na(foreground)] <- 0
+rownames(foreground) <- foreground[,6]
+# foreground <- foreground[,1:5]
+foreground <- as.matrix(foreground)
+colnames(foreground) <- c("C1", "C2", "C3", "C4", "C5", "gene_id")
+
+# write the tables
+write.table(background[,"gene_name"], file="export.dir/background.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+
+write.table(foreground[,c("gene_id", "C1", "C2", "C3", "C4", "C5")], file="export.dir/foreground.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+```
+
+# GO biological Pathways analysis by cluster
+
+Here I run pathways analysis (GO biological pathways) on each cluster to determine which pathways are enriched in the different tissues. Top 10 pathways in each cluster are plotted (i.e. top 10 significantly enriched pathways). This is performed using cgat-apps runGO.py.
+
+```{r pathways.analyis, echo=FALSE, message=FALSE}
+
+# Run GO analysis using commandline statement
+
+if (!(file.exists("export.dir/tissue_pathways.log"))){
+statement = "source ~/.bashrc; python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground.tsv -b export.dir/background.tsv --filename-input=annotations/c5.bp.v6.1.symbols.tsv -q BH --ontology=GO_BP --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/tissue_pathways.log"
+
+system(statement)
+}
+```
+
+## Cluster 1: High in Ileum
+
+```{r pathways.plot.c1, fig.height=5, fig.width=5, echo=FALSE, message=FALSE}
+
+topten <- function(x, method="fdr"){
+  x <- x[x$code == "+",]
+  if (method == "fold"){
+      x <- x[order(x$ratio, decreasing=TRUE),]
+  }
+  else{
+    x <- x[order(x$fdr, decreasing=FALSE),]
+  }
+  x <- x[1:10,]
+  return(x)
+  }
+
+c1.bp.results <- topten(read.csv("export.dir/GO_BP.C1.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+
+kable(c1.bp.results, caption="Top 10 enriched pathways in cluster 1")
+
+# Need to try and add labels that are readable or at least understandable
+c1.bp.colors <- ifelse(grepl("LIPID", c1.bp.results$description), "darkorchid1", "grey")
+c1.bp.colors <- ifelse(grepl("SMALL_MOLECULE", c1.bp.results$description), "rosybrown1", c1.bp.colors)
+names(c1.bp.colors) <- c1.bp.results$description
+
+c1.bp.results$x <- seq(1,10,1)
+c1.bp.results$y <- 2.5
+
+# all of these plots have the same issue with discrepancy between this document and
+# output images. I will try to make them compatible.
+
+p.c1.bp <- plotPathways(c1.bp.results, relevel=FALSE, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[1], nrow(c1.bp.results))) + ylim(0,3)
+
+# save with additional tweaking of the fontsize etc
+p.c1.bp.write <- p.c1.bp + theme(axis.text.x=element_text(size=0)) + theme(axis.text.x=element_text(angle=0)) + geom_point(size=1.5, aes(x=x, y=y, color=goid)) + scale_color_manual(values=c1.bp.colors)
+
+ggsave("export.dir/GO_BP_C1_bar.pdf", plot=p.c1.bp.write, height=2, width=2)
+
+# for report
+p.c1.bp.write
+```
+
+## Cluster 2: Low in Ileum
+
+```{r pathways.plot.c2, fig.height=5, fig.width=5, echo=FALSE, message=FALSE}
+
+c2.bp.results <- topten(read.csv("export.dir/GO_BP.C2.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+
+kable(c2.bp.results, caption="Top 10 enriched pathways in cluster 2")
+
+# Need to try and add labels that are readable or at least understandable
+c2.bp.colors <- ifelse(grepl("AM", c2.bp.results$description), "darkseagreen2", "skyblue3")
+c2.bp.colors <- ifelse(grepl("CELL_CYCLE", c2.bp.results$description), "pink2", c2.bp.colors)
+
+names(c2.bp.colors) <- c2.bp.results$description
+
+c2.bp.results$x <- seq(1,10,1)
+c2.bp.results$y <- 4
+
+p.c2.bp <- plotPathways(c2.bp.results, relevel=FALSE, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[2], nrow(c2.bp.results)))
+
+# write with tweaking
+p.c2.bp.write <- p.c2.bp  + theme(axis.text.x=element_text(size=0)) + ylim(0,5) + theme(axis.text.x=element_text(angle=0)) + geom_point(aes(x=x, y=y, color=goid), size=1.5) + scale_color_manual(values=c2.bp.colors)
+
+# save
+ggsave("export.dir/GO_BP_C2_bar.pdf", plot=p.c2.bp.write, height=2, width=2)
+
+# for report
+p.c2.bp.write
+```
+
+## Cluster 3: High in Rectum
+
+```{r pathways.plot.c3, fig.height=5, fig.width=5, echo=FALSE, message=FALSE}
+
+c3.bp.results <- topten(read.csv("export.dir/GO_BP.C3.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+
+kable(c3.bp.results, caption="Top 10 enriched pathways in cluster 3")
+
+# These are all really the same types of pathways
+c3.bp.colors <- rep("chocolate3", 10)
+names(c3.bp.colors) <- c3.bp.results$description
+
+c3.bp.results$x <- seq(1,10,1)
+c3.bp.results$y <- 2.5
+
+p.c3.bp <- plotPathways(c3.bp.results, relevel=FALSE, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[3], nrow(c3.bp.results)))
+
+p.c3.bp.write <- p.c3.bp + theme(axis.text.x=element_text(size=0)) + ylim(0,3) + theme(axis.text.x=element_text(angle=0)) + geom_point(aes(x=x, y=y, color=goid), size=1.5) + scale_color_manual(values=c3.bp.colors)
+
+# save
+ggsave("export.dir/GO_BP_C3_bar.pdf", plot=p.c3.bp.write, height=2, width=2)
+
+# for report
+p.c3.bp.write
+```
+
+## Cluster 4: Low in Rectum
+
+```{r pathways.plot.c4, fig.height=5, fig.width=5, echo=FALSE, message=FALSE}
+
+c4.bp.results <- topten(read.csv("export.dir/GO_BP.C4.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+
+kable(c4.bp.results, caption="Top 10 enriched pathways in cluster 4")
+
+# These are all really the same types of pathways
+c4.bp.colors <- ifelse(grepl("B_CELL", c4.bp.results$description), "firebrick", "slategrey")
+c4.bp.colors <- ifelse(grepl("ADAPTIVE", c4.bp.results$description), "turquoise3", c4.bp.colors)
+names(c4.bp.colors) <- c4.bp.results$description
+
+c4.bp.results$x <- seq(1,10,1)
+c4.bp.results$y <- 6
+
+p.c4.bp <- plotPathways(c4.bp.results, relevel=FALSE, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[4], nrow(c4.bp.results)))
+
+# tweak
+p.c4.bp.write <- p.c4.bp + theme(axis.text.x=element_text(size=0)) + ylim(0,6) + theme(axis.text.x=element_text(angle=0)) + geom_point(aes(x=x, y=y, color=goid), size=1.5) + scale_color_manual(values=c4.bp.colors)
+
+# save
+ggsave("export.dir/GO_BP_C4_bar.pdf", plot=p.c4.bp.write, height=2, width=2)
+
+# for report
+p.c4.bp.write
+
+```
+
+## Cluster 5: Subset of ileum samples high in expression
+
+No significant pathways for this small cluster.
+
+## Matrices of genes in top ten pathways for each cluster
+
+This set of analyses serves to look at how pathways related to each other in terms of the genes that are present (and differentially expressed). I provides a guage of how redundant the significant biological pathway gene sets are.
+
+```{r read.genesets, echo=FALSE, message=FALSE}
+genesets.bp <- read.csv("annotations/c5.bp.v6.1.symbols.tsv", header=FALSE, sep="\t")
+```
+
+## Cluster 1
+
+```{r c1.bp.matrix, fig.height=10, fig.width=7, echo=FALSE, message=FALSE}
+
+total.c1.bp <- buildGenesetGenelist(c1.bp.results, genesets.bp)
+sig.gene.names <- results.table[sig.genes,]$gene_name
+
+# Get all the clusters' gene names here
+c1.gene.names <- results.table$gene_name[results.table$gene_id %in% c1.genes] 
+c2.gene.names <- results.table$gene_name[results.table$gene_id %in% c2.genes] 
+c3.gene.names <- results.table$gene_name[results.table$gene_id %in% c3.genes] 
+c4.gene.names <- results.table$gene_name[results.table$gene_id %in% c4.genes] 
+
+total.c1.bp <- intersect(total.c1.bp, c1.gene.names)
+c1.bp.matrix <- buildGeneMatrix(total.c1.bp, c1.bp.results, genesets.bp)
+binaryHeatmap(c1.bp.matrix, colour=cluster.colors[1], labels=FALSE)
+```
+
+
+## Cluster 2
+
+```{r c2.matrix, fig.height=10, fig.width=7, echo=FALSE, message=FALSE}
+
+total.c2.bp <- buildGenesetGenelist(c2.bp.results, genesets.bp)
+total.c2.bp <- intersect(total.c2.bp, c2.gene.names)
+c2.bp.matrix <- buildGeneMatrix(total.c2.bp, c2.bp.results, genesets.bp)
+binaryHeatmap(c2.bp.matrix, colour=cluster.colors[2], labels=FALSE)
+
+```
+
+## Cluster 3
+
+```{r c3.matrix, fig.height=10, fig.width=7, echo=FALSE, message=FALSE}
+
+total.c3.bp <- buildGenesetGenelist(c3.bp.results, genesets.bp)
+total.c3.bp <- intersect(total.c3.bp, c3.gene.names)
+c3.bp.matrix <- buildGeneMatrix(total.c3.bp, c3.bp.results, genesets.bp)
+binaryHeatmap(c3.bp.matrix, colour=cluster.colors[3], labels=FALSE)
+```
+
+## Cluster 4
+
+```{r c4.matrix, fig.height=20, fig.width=7, echo=FALSE, message=FALSE}
+
+total.c4.bp <- buildGenesetGenelist(c4.bp.results, genesets.bp)
+total.c4.bp <- intersect(total.c4.bp, c4.gene.names)
+c4.bp.matrix <- buildGeneMatrix(total.c4.bp, c4.bp.results, genesets.bp)
+binaryHeatmap(c4.bp.matrix, colour=cluster.colors[4], labels=FALSE)
+```
+
+# Genes of interest based on pathways analysis
+
+Is is of interest to drill down a little deeper into genes that contribute to the significantly enriched pathways. As lipid metabolism and various other metabolism-based pathways came out I will use the reactome database annotations to try and find some more meaningful (i.e. lower level functions) and lower level annotations for genes of interest.
+
+## Reactome analysis
+
+I perfomr enrchment analysis of reactome genesets here.
+
+```{r read.reactome, echo=FALSE, message=FALSE}
+
+if (!(file.exists("export.dir/reactome_pathways.log"))){
+reactome <- read.csv("annotations/c2.cp.reactome.v6.1.symbols.tsv", sep="\t", header=FALSE)
+
+# run pathways analysis
+statement = "source ~/.bashrc; python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground.tsv -b export.dir/background.tsv --filename-input=annotations/c2.cp.reactome.v6.1.symbols.tsv -q BH --ontology=REACTOME --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/tissue_reactome_pathways.log"
+
+system(statement)
+}
+```
+
+Examining the results tables suggests that there are a number of solute carriers that are differentially expressed between tissues. I next have a look at whether there is any enrichment of any particular family of SLC proteins. This requires building a database with the family memebers annotated and then running the enrichment analysis.
+
+```{r build.slc.database, echo=FALSE, message=FALSE}
+
+slc.genes <- as.character(genesets.bp[grep("SLC", genesets.bp$V2),]$V2)
+slc.gene.families <- gsub("SLC", "", slc.genes)
+slc.gene.families <- gsub("O", "", slc.gene.families)
+
+slc.gene.families <- unlist(strsplit(slc.gene.families, "[A-Z].*"))
+
+# build the database
+slc.genesets <- data.frame(V1=rep("REACTOME_SLC_FAMILIES", length(slc.genes)),
+                           V2=slc.genes,
+                           V3=paste0("SLC_FAMILY_", slc.gene.families),
+                           V4=paste0("SLC_FAMILY_", slc.gene.families),
+                           V5=rep("http://www.broadinstitute.org/gsea/misigdb/cards/REACTOME", length(slc.genes)))
+
+slc.genesets <- slc.genesets[unique(slc.genesets$V2),]
+
+# write out the geneset
+write.table(slc.genesets, file="export.dir/REACTOME_SLC_FAMILIES.tsv", sep="\t", quote=FALSE, col.names = FALSE, row.names=FALSE)
+
+```
+
+```{r slc.enrichments, echo=FALSE, message=FALSE}
+
+if(!(file.exists("export.dir/reactome_scl_families_pathways.log"))){
+# run pathways analysis
+statement = "source ~/.bashrc; python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground.tsv -b export.dir/background.tsv --filename-input=export.dir/REACTOME_SLC_FAMILIES.tsv -q BH --ontology=REACTOME_SLC_FAMILIES --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/reactome_scl_families_pathways.log"
+
+system(statement)
+}
+```
+
+There isn't much going on in terms of specific families of SLC transporters - especially in the Ileum. However there are the Ileal bile acid transporters that are in cluster 1 (ileum). Bile acid uptake is important in regulating nutrient absorbtion in the small intestine. It is of interest that bile acids activate FXR and we do see that both FXR1 and FXR2 are part of cluster1, suggesting that these have a role in the ileum. These nuclear receptors are likely acting to regulate lipid metabolism in the ileum. Below I plot the bile acid transporters and FXR1 and FXR2 to show that bile acid related pathways are different in the ileum compared with the caecum and rectum.
+
+## Bile acid transport and function in the ileum
+
+Below are the plots showing the bile acid transporters and FXR nuclear receptors across tissues.
+
+```{r bile.acid.function, fig.height=10, fig.width=10, echo=FALSE, message=FALSE}
+
+gene_id2gene_name <- data.frame(gene_id = results.table$gene_id, gene_name = results.table$gene_name)
+bile.acid <- gene_id2gene_name[gene_id2gene_name$gene_name %in% c("SLC10A2", "SLC10A5", "FXR1", "FXR2"),]
+mat.bile.acid <- log2cpm(mat)[bile.acid$gene_id,]
+rownames(mat.bile.acid) <- bile.acid$gene_name
+metadata$sample <- metadata$Code
+
+grobs.bile.acids <- list()
+for (i in 1:length(bile.acid$gene_name)){
+  outfile <- paste0(bile.acid$gene_name[i], ".pdf")
+  p <- plotGeneOfInterest("Cluster 1", mat.bile.acid[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")
+  grobs.bile.acids[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), height=5, width=5)
+    }
+grid.arrange(grobs=grobs.bile.acids, ncol=2, nrow=2)
+```
+
+## Cytochrome P450 components
+
+A number of cytochrome P450 components fall into cluster 1. These are part of small molecule metabolic pathways and are involved in xenobiotic metabolism. It is unsurprising that these are more highly expressed in the ileum compared to the large intestine. Visualisation of these components is below.
+
+```{r cyp.enzymes, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+
+cyp.names <- rownames(c1.bp.matrix)[grep("CYP", rownames(c1.bp.matrix))]
+cyp.ids <- gene_id2gene_name[gene_id2gene_name$gene_name %in% cyp.names,]
+
+cyp.mat <- log2cpm(mat)[cyp.ids$gene_id,]
+rownames(cyp.mat) <- cyp.ids$gene_name
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+
+cyp.colours <- colorRampPalette(c("lightblue", "white", "aquamarine3"))(75)
+                           
+pheatmap(cyp.mat, color = cyp.colours , scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=TRUE, show_colnames=FALSE) 
+```
+
+## ATP synthase components
+
+Of note, cluster 2 contains mitochondrial genes involved in OXPHOS - this includes a number of ATP synthase genes plotted below.
+
+```{r atp.enzymes, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+
+atp.names <- rownames(c2.bp.matrix)[grep("ATP", rownames(c2.bp.matrix))]
+atp.ids <- gene_id2gene_name[gene_id2gene_name$gene_name %in% atp.names,]
+
+atp.mat <- log2cpm(mat)[atp.ids$gene_id,]
+rownames(atp.mat) <- atp.ids$gene_name
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+
+atp.colours <- colorRampPalette(c("lightblue", "white", "gold1"))(75)
+                           
+pheatmap(atp.mat, color = atp.colours , scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=TRUE, show_colnames=FALSE) 
+
+```
+
+## Protein translation
+
+Also of note, cluster 2 contains genes involved in translation e.g. ribosomal proteins involved in the GO_AMIDE_BIOSYNTHETIC_PROCESS. This suggests cellular growth (I think). Of interest and based on other observations, there are a number of immune-cell specific ribosomal proteins that were defined in [this paper](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1104-z)
+
+```{r rpl.enzymes, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+
+rpl.names <- rownames(c2.bp.matrix)[grep("^RPL", rownames(c2.bp.matrix))]
+
+# There are a lot of RPL proteins here. Using data from a paper I will show just the ones that seem to be specific to 
+# Lymphocytes and/or monocytes
+rpl.spec <- c("RPL27", "RPL14", "RPL22", "RPL29", "RPL27", "RPL12", "RPL37", "RPL26", "RPL13", "RPL26")
+
+rpl.names <- intersect(rpl.names, rpl.spec)
+
+rpl.ids <- gene_id2gene_name[gene_id2gene_name$gene_name %in% rpl.names,]
+
+rpl.mat <- log2cpm(mat)[rpl.ids$gene_id,]
+rownames(rpl.mat) <- rpl.ids$gene_name
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+
+rpl.colours <- colorRampPalette(c("lightblue", "white", "gold1"))(75)
+#rpl.colours <- colorRampPalette(c("blue", "white", "red"))(75)
+#rpl.colours <- colorRampPalette(c("blue", "white", "orange"))(75)
+
+pheatmap(rpl.mat, color = rpl.colours , scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=TRUE, show_colnames=FALSE) 
+```
+
+## SNARE complex and neuronal processes
+
+Cluster 3, whish is predominantly rectum-associated, has higher expression of genes involved in synapse assembly and formation. It is likely that this represents an increased frequency of nneuronal cell types in the rectum relative to other cell types.
+
+```{r snare.complex, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+
+neuronal.names <- rownames(c3.bp.matrix[c3.bp.matrix$GO_REGULATION_OF_NEUROTRANSMITTER_LEVELS == 1,])
+
+# There are a lot of names here so could get by with fewer - stick to SNARE complex
+neuronal.names <- neuronal.names[grep("^SYT", neuronal.names)]
+neuronal.names <- append(neuronal.names, "SNAP25")
+
+neuronal.ids <- gene_id2gene_name[gene_id2gene_name$gene_name %in% neuronal.names,]
+
+neuronal.mat <- log2cpm(mat)[neuronal.ids$gene_id,]
+rownames(neuronal.mat) <- neuronal.ids$gene_name
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+
+neuronal.colours <- colorRampPalette(c("lightblue", "white", "purple"))(75)
+
+pheatmap(neuronal.mat, color = neuronal.colours , scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=TRUE, show_colnames=FALSE) 
+```
+
+## Immune pathways
+
+Cluster 4 represents activated immune signatures. The cluster itself is a bit of a mix between genes that are more highly expressed in the caecum/rectum and those that are higher in the ileum. Clearly there is a B-cell and adaptive immune system signature. Below I plot the B cell signature (GO_B_CELL_MEDIATED_IMMUNITY).
+
+```{r B.cells, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+
+Bcell.names <- rownames(c4.bp.matrix[c4.bp.matrix$GO_B_CELL_MEDIATED_IMMUNITY >0,])
+
+# for display purposes just look at the Ig genes
+Bcell.names <- Bcell.names[grep("^IG", Bcell.names)]
+
+Bcell.ids <- gene_id2gene_name[gene_id2gene_name$gene_name %in% Bcell.names,]
+
+Bcell.mat <- log2cpm(mat)[Bcell.ids$gene_id,]
+rownames(Bcell.mat) <- Bcell.ids$gene_name
+
+sample.annotation <- data.frame(Tissue=metadata$Tissue.location)
+rownames(sample.annotation) <- as.character(metadata$Code)
+annotation.colours <- list("Tissue" = c(Ileum = blues9[3], Caecum = blues9[7], Rectum = blues9[9]))
+Bcell.colours <- colorRampPalette(c("lightblue", "white", cluster.colors[4]))(75)
+                           
+pheatmap(Bcell.mat, color = Bcell.colours , scale = "row", cluster_rows = TRUE, cluster_cols = TRUE, annotation_col = sample.annotation, clustering_distance_rows = "manhattan", clustering_distance_cols = "manhattan", clustering_method = "ward.D", annotation_colors = annotation.colours, show_rownames=TRUE, show_colnames=FALSE) 
+
+```
+
+# Enrichment of transcription factor motifs in clusters
+
+Given the large variation in gene expression between tissue sites it was of interest to see if this translates to differences in transcritpion factor signatures that may be responsible for tissue-defining gene clusters. To determine this, I run enrichment analysis using transfac match genesets from the MsigDB (v6.1).
+
+Below are plots to show the top ten motifs that are enriched in the different gene clusters.
+
+```{r tf.enrichment, echo=FALSE, message=FALSE}
+
+if (!(file.exists("export.dir/c3_tft_motif.log"))){
+
+# run tf motif analysis
+statement = "source ~/.bashrc; python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground.tsv -b export.dir/background.tsv --filename-input=/gfs/work/nilott/proj039/data/pathway_genesets/c3.tft.v6.1.symbols.tsv -q BH --ontology=c3.tft.v6.1.symbols --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/c3_tft_motif.log"
+
+system(statement)
+}
+```
+
+## Cluster 1 tf enrichment
+
+```{r enrichment.c1.tfs, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+c1.tft.results <- topten(read.csv("export.dir/c3.tft.v6.1.symbols.C1.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+p.c1.tft <- plotPathways(c1.tft.results, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[1], nrow(c1.bp.results))) + ylim(0,3)
+
+# write
+p.c1.tft.to.write <- p.c1.tft + theme(axis.text.x=element_text(size=6, angle=90,hjust=0.95,vjust=0.2)) + theme(axis.text.x=element_text(angle=0))
+
+ggsave("export.dir/c3.tft.v6.1.symbols.C1_bar.pdf", plot=p.c1.tft.to.write, height=2, width=2)
+
+p.c1.tft
+```
+
+## Cluster 2 tf enrichment
+
+```{r enrichement.c2.tfs, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+c2.tft.results <- topten(read.csv("export.dir/c3.tft.v6.1.symbols.C2.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+p.c2.tft <- plotPathways(c2.tft.results, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[2], nrow(c1.bp.results))) + ylim(0,3)
+
+# tweaking the plot to write out
+p.c2.tft.to.write <- p.c2.tft + theme(axis.text.x=element_text(size=6, angle=90,hjust=0.95,vjust=0.2)) + theme(axis.text.x=element_text(angle=0))
+
+# for report
+ggsave("export.dir/c3.tft.v6.1.symbols.C2_bar.pdf", plot=p.c2.tft.to.write, height=2, width=2)
+
+# for report
+p.c2.tft
+```
+
+## Cluster 3 tf enrichment
+
+```{r enrichement.c3.tfs, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+c3.tft.results <- topten(read.csv("export.dir/c3.tft.v6.1.symbols.C3.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+p.c3.tft <- plotPathways(c3.tft.results, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[3], nrow(c1.bp.results))) + ylim(0,3)
+
+# tweaking the plot to write
+p.c3.tft.to.write <- p.c3.tft + theme(axis.text.x=element_text(size=6, angle=90,hjust=0.95,vjust=0.2)) + theme(axis.text.x=element_text(angle=0))
+ggsave("export.dir/c3.tft.v6.1.symbols.C3_bar.pdf", plot=p.c3.tft.to.write, height=2, width=2)
+
+# for report
+p.c3.tft
+```
+
+## Cluster 4 tf enrichment
+
+```{r enrichement.c4.tfs, fig.height=5, fig.width=10, echo=FALSE, message=FALSE}
+c4.tft.results <- topten(read.csv("export.dir/c3.tft.v6.1.symbols.C4.results", header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+p.c4.tft <- plotPathways(c4.tft.results, text.size=1.2) + scale_fill_manual(values=rep(cluster.colors[4], nrow(c1.bp.results))) + ylim(0,3)
+
+# tweaking to write
+
+p.c4.tft.to.write <- p.c4.tft + theme(axis.text.x=element_text(size=6, angle=90,hjust=0.95,vjust=0.2)) + theme(axis.text.x=element_text(angle=0))
+ggsave("export.dir/c3.tft.v6.1.symbols.C4_bar.pdf", plot=p.c4.tft.to.write, height=2, width=2)
+
+# for report
+p.c4.tft
+```
+
+# Genes of interest
+
+It is difficult to narrow down exactly which genes to present and which are the most important in each cluster. Here I look at how genes that fall into the different significant GO biological pathways are related to genes that are part of enriched transcription factor motifs. That is, the expectation is that enriched transcription factor motifs will be involved in some of the biological pathways that are also associated. 
+
+## HNF1 and lipid metabolism
+
+There are established links between HNF transcription factors and the regulation of fatty acid metabolism. Here I look at a selection of genes that link HNF and lipid metabolism. For example see [here](https://www.ncbi.nlm.nih.gov/pubmed/10852923)
+
+```{r hnf.lipid, echo=FALSE, message=FALSE, fig.height=15, fig.width=20}
+
+# need to rebuild matrices to allow Rmd to render
+genesets.tf <- read.csv("/gfs/work/nilott/proj039/data/pathway_genesets/c3.tft.v6.1.symbols.tsv", header=FALSE, sep="\t")
+total.c1.tf <- buildGenesetGenelist(c1.tft.results, genesets.tf)
+sig.gene.names <- results.table[sig.genes,]$gene_name
+total.c1.tf <- intersect(total.c1.tf, c1.gene.names)
+c1.matrix.tf <- buildGeneMatrix(total.c1.tf, c1.tft.results, genesets.tf)
+
+gois.lipid.hnf <- rownames(c1.bp.matrix[c1.bp.matrix$GO_LIPID_METABOLIC_PROCESS == 1,])
+gois.lipid.hnf <- intersect(rownames(c1.matrix.tf[c1.matrix.tf$HNF1_01 == 1,]), gois.lipid.hnf)
+gois.lipid.hnf <- append(gois.lipid.hnf, "HNF1A")
+
+gois.lipid.hnf.res <- results.table[results.table$gene_name %in% gois.lipid.hnf,]
+gois.lipid.hnf.mat <- log2cpm(mat)[gois.lipid.hnf.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.lipid.hnf <- list()
+for (i in 1:length(gois.lipid.hnf.res$gene_name)){
+  gene <- gois.lipid.hnf.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.lipid.hnf.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[1])) + ylab("log2(cpm)")
+  grobs.lipid.hnf[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.lipid.hnf, ncol=4, nrow=3)
+```
+
+## Protein synthesis, proliferation etc
+
+E2F transcription factor is an elongation factor that is important for regulation of cell cycle genes. It is unsurprising that this transcription factor has emerged as regulating cluster 2 genes. Here we investigate how it relates to cell cycle control.
+
+```{r e2f.cellcycle, echo=FALSE, message=FALSE, fig.height=45, fig.width=20}
+
+# need to rebuild matrices to allow Rmd to render
+genesets.tf <- read.csv("/gfs/work/nilott/proj039/data/pathway_genesets/c3.tft.v6.1.symbols.tsv", header=FALSE, sep="\t")
+total.c2.tf <- buildGenesetGenelist(c2.tft.results, genesets.tf)
+sig.gene.names <- results.table[sig.genes,]$gene_name
+total.c2.tf <- intersect(total.c2.tf, c2.gene.names)
+c2.matrix.tf <- buildGeneMatrix(total.c2.tf, c2.tft.results, genesets.tf)
+
+gois.cellcycle.e2f <- rownames(c2.bp.matrix[c2.bp.matrix$GO_CELL_CYCLE == 1,])
+gois.cellcycle.e2f <- intersect(rownames(c2.matrix.tf[c2.matrix.tf$E2F1_Q6 == 1,]), gois.cellcycle.e2f)
+
+gois.cellcycle.e2f.res <- results.table[results.table$gene_name %in% gois.cellcycle.e2f,]
+gois.cellcycle.e2f.mat <- log2cpm(mat)[gois.cellcycle.e2f.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.cellcycle.e2f <- list()
+for (i in 1:length(gois.cellcycle.e2f.res$gene_name)){
+  gene <- gois.cellcycle.e2f.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.cellcycle.e2f.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[2]))  + ylab("log2(cpm)")
+  grobs.cellcycle.e2f[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.cellcycle.e2f, ncol=4, nrow=9)
+```
+
+## SRF transcription factor and neuronal functions?
+
+SRF transcription factors look to be involved in [neuronal survival](https://www.jneurosci.org/content/24/9/2277) although it has broader functions in multiple cells types
+
+```{r srf.neurons, echo=FALSE, message=FALSE, fig.height=15, fig.width=20}
+
+# need to rebuild matrices to allow Rmd to render
+genesets.tf <- read.csv("/gfs/work/nilott/proj039/data/pathway_genesets/c3.tft.v6.1.symbols.tsv", header=FALSE, sep="\t")
+total.c3.tf <- buildGenesetGenelist(c3.tft.results, genesets.tf)
+sig.gene.names <- results.table[sig.genes,]$gene_name
+total.c3.tf <- intersect(total.c3.tf, c3.gene.names)
+c3.matrix.tf <- buildGeneMatrix(total.c3.tf, c3.tft.results, genesets.tf)
+
+
+gois.srf.neurons <- rownames(c3.bp.matrix[c3.bp.matrix$GO_NEUROGENESIS == 1,])
+gois.srf.neurons <- intersect(rownames(c3.matrix.tf[c3.matrix.tf$SRF_Q6 == 1,]), gois.srf.neurons)
+
+gois.srf.neurons.res <- results.table[results.table$gene_name %in% gois.srf.neurons,]
+gois.srf.neurons.mat <- log2cpm(mat)[gois.srf.neurons.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.srf.neurons <- list()
+for (i in 1:length(gois.srf.neurons.res$gene_name)){
+  gene <- gois.srf.neurons.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.srf.neurons.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[3])) + ylab("log2(cpm)")
+  grobs.srf.neurons[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.srf.neurons, ncol=4, nrow=3)
+
+```
+
+## Neurotransmitter release in the rectum
+
+From the data above it seems like there is increased neurogenesis and/or neuronal survival. Although not shown here, there is no general increased expression of the neuronal marker ELAVL4, suggesting that there isn't an increased density of neurons in the rectum. It may be that there is an increase in a specific sub-population of neurons and it therefore may be helpful to look at the set of genes that are involved in neurotransmitter release to get an idea of this.
+
+
+```{r neurotransmitter.release, echo=FALSE, message=FALSE, fig.height=60, fig.width=20}
+
+gois.neurotransmitter <- rownames(c3.bp.matrix[c3.bp.matrix$GO_REGULATION_OF_NEUROTRANSMITTER_LEVELS == 1,])
+
+# dopamine receptors possibly
+gois.neurotransmitter.res <- results.table[results.table$gene_name %in% gois.neurotransmitter & results.table$padj < 0.05,]
+gois.neurotransmitter.mat <- log2cpm(mat)[gois.neurotransmitter.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.neurotransmitter <- list()
+for (i in 1:length(gois.neurotransmitter.res$gene_name)){
+  gene <- gois.neurotransmitter.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.neurotransmitter.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[3])) + ylab("log2(cpm)")
+  grobs.neurotransmitter[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.neurotransmitter, ncol=4, nrow=12)
+
+```
+
+## ETS transcription factor and adaptive immunity
+
+ETS transcription factors are broadly expressed and involved in multiple cellular processes. It has also been shown that ETS transcription factors are also involved in activation and proliferative capacity of [T cells](https://www.ncbi.nlm.nih.gov/pubmed/7566177). It is also expressed at high levels in B cells. Here I hypothesise that the ETS is regulating genes involved in lymphocyte activation in cluster 4 (high in caecum predominantly).
+
+```{r ets.adaptive.immunity, echo=FALSE, message=FALSE, fig.height=30, fig.width=20}
+
+# need to rebuild matrices to allow Rmd to render
+genesets.tf <- read.csv("/gfs/work/nilott/proj039/data/pathway_genesets/c3.tft.v6.1.symbols.tsv", header=FALSE, sep="\t")
+total.c4.tf <- buildGenesetGenelist(c4.tft.results, genesets.tf)
+sig.gene.names <- results.table[sig.genes,]$gene_name
+total.c4.tf <- intersect(total.c4.tf, c4.gene.names)
+c4.matrix.tf <- buildGeneMatrix(total.c4.tf, c4.tft.results, genesets.tf)
+
+gois.ets.adaptive <- rownames(c4.bp.matrix[c4.bp.matrix$GO_ADAPTIVE_IMMUNE_RESPONSE == 1,])
+gois.ets.adaptive <- intersect(rownames(c4.matrix.tf[c4.matrix.tf$ETS_Q4 == 1 | c4.matrix.tf$RYTTCCTG_ETS2_B == 1 | c4.matrix.tf$RGAGGAARY_PU1_Q6 == 1,]), gois.ets.adaptive)
+
+gois.ets.adaptive.res <- results.table[results.table$gene_name %in% gois.ets.adaptive,]
+gois.ets.adaptive.mat <- log2cpm(mat)[gois.ets.adaptive.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.ets.adaptive <- list()
+for (i in 1:length(gois.ets.adaptive.res$gene_name)){
+  gene <- gois.ets.adaptive.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.ets.adaptive.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[4])) + ylab("log2(cpm)")
+  grobs.ets.adaptive[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.ets.adaptive, ncol=4, nrow=6)
+```
+
+
+## Immunoglobulin genes
+
+It is quite difficult to work out what is going on with the Ig genes but I want to include them here to think about.
+
+
+```{r ig.genes, echo=FALSE, message=FALSE, fig.height=25, fig.width=20}
+
+gois.ig <- rownames(c4.bp.matrix[grep("^IG", rownames(c4.bp.matrix)),])
+
+gois.ig.res <- results.table[results.table$gene_name %in% gois.ig,]
+gois.ig.mat <- log2cpm(mat)[gois.ig.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.ig <- list()
+for (i in 1:length(gois.ig.res$gene_name)){
+  gene <- gois.ig.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  p <- plotGeneOfInterest(gene, gois.ig.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=cluster.colors[4]))  + ylab("log2(cpm)")
+  grobs.ig[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)),  height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.ig, ncol=4, nrow=5)
+```
+
+
+## Factors associated with tertiary lymphoid structure formation
+
+Emily suggested to look at the [single cell paper](https://www.cell.com/cell/fulltext/S0092-8674(18)31168-1) from Alison Simmons group that describes a population of cells that are especially present (S4) in UC patient biopsies that look to be involved in recruiting lymphocytes and follicle formation. I am interested to see which sites are more likely to have follicles based on these markers.
+
+```{r follicle, echo=FALSE, message=FALSE, fig.height=10, fig.width=20}
+gois.follicle <- c("TNFSF14", "CD74", "CLU", "CD24", "IL33", "PDPN", "CCL19")
+
+gois.follicle.res <- results.table[results.table$gene_name %in% gois.follicle,]
+gois.follicle.mat <- log2cpm(mat)[gois.follicle.res$gene_id,]
+
+metadata$Tissue.location <- factor(metadata$Tissue.location, levels=c("Ileum", "Caecum", "Rectum"))
+
+grobs.follicle <- list()
+for (i in 1:length(gois.follicle.res$gene_name)){
+  gene <- gois.follicle.res$gene_name[i]
+  outfile <- paste0(gene, ".pdf")
+  
+  # each one may or may not be in a cluster
+  c.gene <- clusters.df$Cluster[clusters.df$gene_name == gene]
+  if (length(c.gene) == 0){
+    c.color <- "lightgrey"
+  }else{
+    c.color <- cluster.colors[as.numeric(c.gene)]
+  }
+  
+  p <- plotGeneOfInterest(gene, gois.follicle.mat[i,], metadata, variable="Tissue.location") + scale_colour_manual(values=tissue.colours) + theme(legend.position="none")  + theme(strip.background=element_rect(fill=c.color)) + ylab("log2(cpm)")
+  grobs.follicle[[i]] <- p
+  ggsave(paste0("export.dir/", outfile), plot=p + theme(text=element_text(size=6)), height=2, width=2)
+    }
+
+grid.arrange(grobs=grobs.follicle, ncol=4, nrow=2)
+```
+
+It's still a bit of a mixed bag here although activated stroma e.g PDPN is more highly expressed in the caecum and falls in the "immune" cluster.
+
+# Correlation betwen Ig gene expression and proliferation markers
+
+I am interested in whether the increased Ig expression seen in the caecum is somehow related to proliferation of B-cells. Here I look at the correlation between Ig gene expression and the cell cycle control gene E2F1.
+
+```{r cor.ig.e2f2, fig.height=5, fig.width=7, echo=FALSE, message=FALSE}
+
+e2f <- log2cpm(mat)[results.table$gene_id[results.table$gene_name == "E2F1"],]
+
+ig.names <- results.table$gene_name[grep("^IG", results.table$gene_name)]
+
+# get rid of IGF (insulin-like growth factors)
+ig.names <- ig.names[grep("IGF", ig.names, invert=TRUE)]
+
+igs <- log2cpm(mat)[results.table$gene_id[results.table$gene_name %in% ig.names],]
+
+cors.ig.e2f <- correlateMatrixWithVector(igs, unlist(e2f), method="pearson")
+
+# Plot the relationship between immunoglobulin binding protein and
+# e2f1
+
+cor.toplot <- metadata
+cor.toplot$E2F1 <- unlist(e2f) 
+cor.toplot$IGBP1 <- unlist(log2cpm(mat)["ENSG00000089289",])
+
+ggplot(cor.toplot, aes(x=E2F1, y=IGBP1, color=Tissue.location)) + geom_point() + theme_bw() + scale_colour_manual(values=tissue.colours) + stat_smooth(method="lm") 
+
+```
+The only significant correlation was a negative one with the IGBP1. This may be of interest as this protein binds IgM. It is more highly expressed in the Ileum - maybe as B cells have not class switched here??
+
+I produced the plot above to see if there was a correlation between IGBP1 and cell cycle genes i.e. to see if its associated with proliferation. It is not when you account for the different tissues.
+
+
+## Correlation with lymphocyte-specific cell-cycle control genes
+
+E2F1 is quite a general cell-cycle control gene. I suspect that we are looking at increased proliferation in the caecum of a subset of cells - most likely B-cells. In order to see whether this is likely to be the case, I look at the correlation between Ig genes and the lymphocyte-specific cell-cylce control gene HELLS (lymphocyte-specific helicase).
+
+```{r cor.ig.hells, echo=FALSE, message=FALSE}
+
+hells <- log2cpm(mat)[results.table$gene_id[results.table$gene_name == "HELLS"],]
+
+cors.ig.hells <- correlateMatrixWithVector(igs, unlist(hells), method="pearson")
+
+kable(cors.ig.hells[cors.ig.hells$padj < 0.05,])
+
+```
+
+Again, the only significant correlation was a negative one with IGBP1. It's quite difficult to draw any conclusions from this relationship as I can't find anything much in the literature about the specificity of IGBP1. 
+
+# Writing genesets
+
+In further analysis I will explore how differentially expressed genes between disease and healthy fall in terms of the clusters defined above. Therfore here I produce genesets for input into that analysis. These are written out here.
+
+
+```{r build.genesets, echo=FALSE, message=FALSE}
+
+rownames(gene_id2gene_name) <- as.character(gene_id2gene_name$gene_id)
+clusters.df$gene_name <- as.character(gene_id2gene_name[clusters.df$gene,]$gene_name)
+
+ngenes <- nrow(clusters.df)
+tissue.genesets <- data.frame(V1=rep("Tissue.clusters", ngenes),
+                              V2=clusters.df$gene_name,
+                              V3=paste0("Cluster ", clusters.df$Cluster),
+                              V4=paste0("Cluster ", clusters.df$Cluster),
+                              V5=rep("Tissue.clusters", ngenes))
+
+write.table(tissue.genesets,
+            file="export.dir/tissue_genesets.tsv",
+            quote=FALSE,
+            sep="\t",
+            row.names=FALSE,
+            col.name=FALSE)
+
+```
+
+```{r write.clusters, echo=FALSE, message=FALSE}
+clusters.df$gene_id <- rownames(clusters.df)
+write.table(clusters.df, file="export.dir/clusters.tsv", row.names=FALSE, quote=FALSE, sep="\t")
+
+# write out the sessionInfo()
+writeLines(capture.output(sessionInfo()), "export.dir/sessionInfo.txt")
+```
+
+
+

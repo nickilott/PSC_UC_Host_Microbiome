@@ -1,0 +1,319 @@
+---
+title:
+header-includes: #allows you to add in your own Latex packages
+- \usepackage{float} #use the 'float' package
+- \floatplacement{figure}{H} #make every figure with caption = h
+output:
+  pdf_document:
+    fig_caption: true
+    keep_tex: true
+    latex_engine: pdflatex
+  html_document:
+    df_print: paged
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup.control.analysis, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+# knitr::opts_chunk$set(fig.pos = 'H')
+knitr::opts_knit$set(root.dir = "../")
+
+```
+
+
+## Data analyis {.tabset .tabset-pills}
+
+### Overview
+
+The aim of this initial analysis is to take a look at the controls that we have. These include dilutions of caecal material from minimal microbiome mice (macpherson flora).
+
+The dilution controls consist of two separate dilution series (1, 1:10, 1:100, 1:1000, 1:10000, 1:100000, 1:1000000) representing
+extractions from two different kits that were used to extract DNA - zymo and qiagen. The purpose of the dilution series
+was to identify potential kit/pcr contaminants - those ASVs that increase in relative abundance as DNA dilution increases will
+represent contaminating sequences. We expect a maximum of 12 ASVs for the dilution samples although inevitably there will be
+a number of additional ASVs that come from things like index-switching, sequencing errors and contamination.
+
+
+### Members of the minimal flora
+
+Below is a table of the taxa that are present in the 12 member community:
+
+
+|Strain                                           |Genus
+|-------------------------------------------------|----------------------|
+|Acutalibacter_muris_KB18                         |Clostridium
+|Akkermansia_muciniphila_YL44                     |Akkermansia
+|Bacteroides_caecimuris_strain_148                |Bacteroides
+|Bifidobacterium_animalis_subsp._animalis_YL2     |Bifidobacterium
+|Blautia_coccoides_YL58                           |Blautia
+|Clostridium_clostridioforme_YL32                 |Clostridium
+|Clostridium_inocuum_146                          |Erysipelotrichaceae incertae sedis
+|Enterococcus_faecalis_KB1                        |Enterococcus
+|Flavonifractor_plautii_YL31                      |Flavonifractor
+|Lactobacillus_reuteri_149                        |Lactobacillus
+|Muribaculum_intestinale_YL27                     |Barnesiella
+|Turicimonas_muris_YL45                           |Parasutterella
+
+
+### ASVs detected in each control sample.
+
+I have started off just looking at some broad things in relation to amplicon sequence variants (ASVs). An ASV represents an exact
+sequence that is inferred to be present in the sample i.e. it is not a cluster of sequences like OTUs are. There are therefore more
+ASVs than there are species/strains etc because each strain may have multiple copies of the 16S rRNA gene. After an initial look
+at the level of ASVs I look at taxonomic distributions.
+
+```{r asv-in-controls, fig.cap='Number of ASVs found in control samples', fig.height=5, fig.width=10,message=FALSE, echo=FALSE}
+
+source("R/relab.R")
+source("R/plots.R")
+source("R/utils.R")
+library(reshape)
+library(gridExtra)
+library(dplyr)
+library(knitr)
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+
+metadata <- read.csv("metadata/metadata_microbiome.tsv", header=T, stringsAsFactors=FALSE, row.names=1, sep="\t")
+
+# convert rownames of metadata to match the colnames of asv table
+rownames(metadata) <- gsub("-", ".", rownames(metadata))
+
+asv.df <- read.csv("counts/taxa_abundances.tsv", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+
+# re-order 
+asv.df <- asv.df[,as.character(rownames(metadata))]
+
+# get controls
+to.keep <- rownames(metadata[grep("dil", metadata$Disease),])
+
+asv.df.controls <- asv.df[,to.keep] 
+nasvs.controls <- getNumberOfASVs(asv.df.controls)
+
+# annotate with metadata
+nasvs.controls$dilution <- metadata[rownames(nasvs.controls),]$Disease
+nasvs.controls$kit <- metadata[rownames(nasvs.controls),]$Kit
+nasvs.controls$conc <- metadata[rownames(nasvs.controls),]$Conc
+
+
+p1 <- ggplot(nasvs.controls, aes(x=dilution, y=count)) + geom_bar(stat="identity") + facet_wrap(~kit) + theme_bw()
+
+ggsave("export.dir/nasvs_mm12.pdf", plot=p1 + theme(axis.text=element_text(size=6)), height=2, width=4)
+p1
+
+
+```
+
+The DNA concentrations (data not shown) do not seem to truly reflect the dilution series. However on inspection of the number of ASVs called it certainly looks like more ASVs are called the higher dilutions - particularly when using the Qiagen kit.
+
+
+### Library size, DNA concentration and number of ASVs.
+
+Here we assess the relationships between the library sizes, DNA concentrations and number of ASVs It is expected that the higher the DNA concentration, the
+more reads and thus the more ASVs will be called.
+
+```{r library-sizes, fig.cap='Library size as a function of DNA concentration', fig.height=5, fig.width=10,message=FALSE, echo=FALSE}
+
+nasvs.controls$library.size <- getLibrarySize(asv.df.controls)$nreads
+
+# DNA conc agains library size
+p.ls <- ggplot(nasvs.controls, aes(x=conc, y=library.size, colour=kit)) + geom_point()
+p.ls <- p.ls + scale_colour_manual(values=c("red4", "blue4"))
+p.ls <- p.ls + theme_bw() + geom_smooth(method="lm")
+
+# library size against number of ASVs
+p.nasvs <- ggplot(nasvs.controls, aes(x=library.size, y=count, colour=kit)) + geom_point(size=3)
+p.nasvs <- p.nasvs + scale_colour_manual(values=c("red4", "blue4"))
+p.nasvs <- p.nasvs + theme_bw() + geom_smooth(method="lm")
+
+grid.arrange(p.ls, p.nasvs, ncol=2, nrow=1)
+
+```
+
+For the qiagen kit it certainly looks like the more dilute samples are calling more ASVs even though they do in general have lower library sizes. There is not much going on in the zymo kits.
+
+
+### Total number of genera detected
+
+While there is an ovecalling of ASVs in gereral, this is likely due to sequencing error and the actual taxonomic distribution would not be expected to deviate from what is expected i.e there are likely multiple ASVs called for each taxon that is in the MM12 community.
+
+Here I look at taxonomic distributions - this is basically a collapsed version of ASVs i.e. if multiple sequence variants are assigned to a particular taxon then this will simply add to the count for that taxon. It is therefore a more high-level view of the microbiome than ASV analysis.
+
+We are expecting to identify 10 genera. 11 strains in the minimal microbiome make up these 10 genera. The 12th strain which is Bifidobacteria we know will not be present at detectable levels in the caecal samples.
+
+
+```{r ngenera.detected, fig.cap='Number of genera detected in coltrol samples', fig.height=5, fig.width=10,message=FALSE, echo=FALSE}
+
+genera <- "counts/genus_abundance.tsv"
+genera <- read.csv(genera, stringsAsFactors=F, sep="\t", row.names=1)
+genera.controls.counts <- genera[,to.keep]
+genera.controls <- relab(genera.controls.counts)
+
+# filter 0 in all
+genera.controls <- filterRows(genera.controls, 1, 0)
+
+ngenera.controls <- getNumberOfASVs(genera.controls)
+
+# annotate with metadata
+ngenera.controls$dilution <- metadata[rownames(ngenera.controls),]$Disease
+ngenera.controls$kit <- metadata[rownames(ngenera.controls),]$Kit
+ngenera.controls$conc <- metadata[rownames(ngenera.controls),]$Conc
+
+ngenera.controls$sample <- rownames(ngenera.controls)
+p.genera <- ggplot(ngenera.controls, aes(x=dilution, y=count)) + geom_bar(stat="identity") + facet_wrap(~kit) + theme_bw()
+
+ggsave("export.dir/ngenera_mm12.pdf", plot=p.genera + theme(axis.text=element_text(size=6)), height=2, width=4)
+
+p.genera
+
+```
+
+From this plot it seems a bit clearer than the ASV analysis that at lower concentrations of sample DNA we are picking up more genera which represent contaminants of some description.
+
+### Taxonomic distribution amongst controls
+
+We are expecting to identify 10 genera. 11 strains in the minimal microbiome make up these 10 genera. The 12th strain which is Bifidobacteria we know will not be present at detectable levels in the caecal samples.
+
+
+```{r genus.level, fig.cap='Abundance of genera in oligoMM12', fig.height=4, fig.width=8,message=FALSE, echo=FALSE}
+
+
+# get the taxa that should be present
+should.be.in <- c("Acutalibacter",
+                  "Akkermansia",
+	                "Bacteroides",
+	                "Bifidobacterium",
+                  "Blautia",
+                  "Clostridium",
+                  "Erysipelotrichaceae incertae sedis",
+                  "Enterococcus",
+                  "Flavonifractor",
+                  "Lactobacillus",
+                  "Barnesiella",
+                  "Parasutterella")
+
+
+# plot bar chart
+genera.controls <- genera.controls[order(rowSums(genera.controls), decreasing=TRUE),]
+genera.controls$genus <- getShortNames(rownames(genera.controls), type="none", level="genus")
+genera.controls.filtered <- genera.controls[genera.controls$genus %in% should.be.in,]
+
+# melt
+genera.controls.filtered.m <- melt(genera.controls.filtered)
+
+# add kit metadata
+genera.controls.filtered.m$kit <- metadata[as.character(genera.controls.filtered.m$variable),]$Kit
+genera.controls.filtered.m$dilution <- metadata[as.character(genera.controls.filtered.m$variable),]$Disease
+
+# plot
+colours <- rainbow(nrow(genera.controls.filtered), s=0.5, v=0.5)
+
+p.mm12 <- ggplot(genera.controls.filtered.m, aes(x=dilution, y=value, fill=genus)) + geom_bar(stat="identity") + scale_fill_manual(values=colours) + theme_bw() + facet_wrap(~kit)
+
+ggsave("export.dir/mm12_taxonomy_barplot.pdf", plot=p.mm12 + theme(axis.text=element_text(size=6)), height=4, width=6)
+
+p.mm12
+
+```
+
+Once again these data do show that at the highest dilution - especially for the Qiagen kit - that we see that contaminant genera ared creepin in.
+
+### Number of reads that are correctly assigned to our genera
+
+Below is a table of results that shows the number of reads that are correctly (well at least at the genus level) assigned to MM12 members. This is a rough guide on contaminating reads.
+
+
+```{r contaminating.reads, echo=FALSE, message=FALSE}
+
+genera.controls.counts$genus <- getShortNames(rownames(genera.controls.counts), type="genus", level="genus") 
+genera.controls.counts.f <- genera.controls.counts[genera.controls.counts$genus %in% should.be.in,]
+genera.controls.counts.f <- genera.controls.counts.f[,1:ncol(genera.controls.counts.f)-1]
+
+props.correct <- (colSums(genera.controls.counts.f)/colSums(asv.df.controls))*100
+
+props.correct <- data.frame(kit=metadata[names(props.correct),]$Kit,
+                            dilution=metadata[names(props.correct),]$Disease,
+                            proportion.correct=unlist(props.correct, use.names=FALSE))
+kable(props.correct)
+
+```
+
+### Filtering parameters
+
+At the lowest concentration for the Qiagen kit ~4% reads are assigned to genera that shouldn't be there. Nevertheless, if these are made up of multiple very low abundance genera then we could use these data to determine thresholds that should be used for thresholding our experimental samples. Below I look at various cut-offs and see how it affects the proportion of genera that are assigned correctly.
+
+```{r evaluating cutoffs, echo=FALSE, message=FALSE}
+
+# Using relative abundance cut-offs (%)
+cutoffs <- c(0.001, 0.01, 0.1, 1)
+results <- list()
+genera.controls.counts <- genera.controls.counts[,1:ncol(genera.controls.counts)-1]
+
+for (i in 1:length(cutoffs)){
+  rel.abundance <- relab(genera.controls.counts)
+  rel.abundance <- rel.abundance[rowSums(rel.abundance > cutoffs[i]) >=1,]
+  total <- genera.controls.counts[rownames(rel.abundance),]
+  rel.abundance$genus <- getShortNames(rownames(rel.abundance), type="genus", level="genus") 
+  rel.abundance.f <- rel.abundance[rel.abundance$genus %in% should.be.in,]
+  rel.abundance.f <- rel.abundance.f[,1:ncol(rel.abundance.f)-1]
+  geezies <- genera.controls.counts[rownames(rel.abundance.f),]
+  props.correct <- (colSums(geezies)/colSums(total))*100
+  props.correct <- data.frame(kit=metadata[names(props.correct),]$Kit,
+                            dilution=metadata[names(props.correct),]$Disease,
+                            proportion.correct=unlist(props.correct, use.names=FALSE),
+                            nfound=nrow(rel.abundance.f))
+  props.correct$parameter <- cutoffs[i]
+  results[[i]] <- props.correct
+  }
+results.props <- bind_rows(results)
+kable(results.props)
+```
+
+It only makes a big difference at a cutoff of 1%. This though may result in us not finding everything. Indeed we do not find all genera in the higher cut-offs. I think it is reasonable to use 0.1% as previously done as this gains something without throwing away too much.
+
+### Potential contaminants
+
+Although there isn't a huge amount of concern over contaminants it will be useful to have a list of ASVs/taxa that are potentially contaminants. These are described below and are ASVs that are found in the MM12 that are not MM12.
+
+```{r potential.contaminants, echo=FALSE, message=FALSE}
+
+# MM12 potential contaminants
+asv.df.controls <- asv.df.controls[rowSums(asv.df.controls) > 0,]
+asv.df.controls$genus <- getShortNames(rownames(asv.df.controls), type="ASV", level="genus")
+potential.contaminants <- rownames(asv.df.controls[!(asv.df.controls$genus %in% should.be.in),])
+potential.contaminants <- data.frame(potential.contaminant.asvs=potential.contaminants,
+                                     type=rep("MM12", length(potential.contaminants)))
+
+# Endoscope control potential contaminants
+endoscope <- data.frame(CONTROL = unlist(asv.df[,rownames(metadata[metadata$Disease == "CONTROL",])]))
+endoscope$asv <- rownames(asv.df)
+endoscope <- endoscope[endoscope$CONTROL > 0,]
+endoscope <- data.frame(potential.contaminant.asvs=endoscope$asv,
+                        type=rep("Endoscope control", length(endoscope$asv)))
+
+potential.contaminants <- bind_rows(potential.contaminants, endoscope)
+kable(potential.contaminants)
+
+# write out the contaminants table
+write.table(potential.contaminants, file="export.dir/potential_contaminants.tsv", sep="\t", quote=F, row.names=FALSE)
+```
+
+There are 135 potential contaminant ASVs.
+
+
+### Session Info
+
+```{r session.info.control.analysis, echo=FALSE, message=FALSE}
+# write out the sessionInfo()
+print(capture.output(sessionInfo()))
+
+```
+

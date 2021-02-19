@@ -1,0 +1,1715 @@
+
+```{r setup.deseq.disease, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.extra = '')
+knitr::opts_knit$set(root.dir="../")
+#knitr::opts_chunk$set(fig.pos = 'H')
+
+library(RColorBrewer)
+
+# set colour mapping here
+group.colours <- c("red3", "black", "green3")
+names(group.colours) <- c("UC", "HEALTHY", "PSC/UC")
+
+tissue.colours <- c(blues9[3], blues9[6], blues9[9])
+names(tissue.colours) <- c("Ileum", "Caecum", "Rectum")
+
+# cluster colors
+cluster.colors <- brewer.pal(5, "Set3")
+names(cluster.colors) <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster 5")
+
+combined.colours <- c("red3",
+                        "black",
+                        "green3",
+                        "red3",
+                        "black",
+                        "green3",
+                        "red3",
+                        "black",
+                        "green3")
+
+names(combined.colours) <- c("IleumUC",
+                             "IleumHEALTHY",
+                             "IleumPSC/UC",
+                             "CaecumUC",
+                             "CaecumHEALTHY",
+                             "CaecumPSC/UC", 
+                             "RectumUC",
+                             "RectumHEALTHY",
+                             "RectumPSC/UC")
+
+set.seed(5)
+```
+
+## Data analysis {.tabset .tabset-pills}
+
+### Overview
+
+This analysis is concerned with identifying differentially expressed genes across disease states. Primarily we are interested in whether there is a particular gene expression signature that is associated with PSC/UC as opposed to UC alone. There are some complicating factors in the analysis in that a small subset of samples are mildly inflamed - this could affect differential expression results. Nevertheless, I have presiously shown that there are no statistically significant differences betwen PSC/UC and UC in terms of Nancy scores at each of the tissue sites sampled.
+
+
+### Dataset at a glance
+
+I have decided to perform differential expression analysis at each site separately and then compare the results. Initially I am using the LRT test in DESeq2 to define differentially expressed genes between healthy, PSC/UC and UC. The idea is that we could do something similar to the between tissue analyses if the differences in disease groups are not too subtle. First I will perform some further exploratory analysis.
+
+
+```{r load.libraries.disease, echo=FALSE, message=FALSE}
+library(gplots)
+library(gridExtra)
+library(knitr)
+library(DESeq2)
+#library(vsn)
+library(RSQLite)
+library(grid)
+library(gridExtra)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(ggcorrplot)
+library(ComplexHeatmap)
+library(psych)
+# library(patchwork)
+library(vegan)
+source("R/pathways_helper.R")
+source("R/deseq2.R")
+source("R/deseq2_helper.R")
+source("R/MIGTranscriptome_retrieval.R")
+source("R/MIGTranscriptome_plotting.R")
+source("R/threewayvenn.R")
+source("R/plotGenesOfInterestByTissue.R")
+source("R/correlate.R")
+
+if (!(dir.exists("export.dir"))){
+  dir.create("export.dir")
+}
+```
+
+I will base some of the filtering steps on the number of samples that I have in each tissue/disease group. Below is a summary of these numbers. The filtering is the same as was performed for defining differentially expressed genes between tissues. This allows a more straightforward comparison between analyses.
+
+```{r summary.of.numbers.disease, echo=FALSE, message=FALSE}
+metadata <- read.csv("metadata/metadata_rnaseq.tsv", header=T, stringsAsFactors=FALSE, sep="\t")
+rownames(metadata) <- metadata$Code
+summary.of.numbers <- data.frame(Tissue=metadata$Tissue.location, Disease=metadata$Disease)
+kable(table(summary.of.numbers))
+
+# make individual a character
+metadata$Individual <- as.character(metadata$Individual)
+
+# write out metadata to be compatible with the MIGTranscriptomeExplorer
+metadata$sample <- metadata$Code
+metadata$group <- paste0(metadata$Tissue.location, metadata$Disease)
+
+write.table(metadata, file="export.dir/MIGTranscriptome_0008.metadata", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+
+### Description of the metadata
+
+Significance of metadata variables associated with group status is explored here. I feel like these are better as a plot rather than a table but could be wrong. Plot age, sex, nancy.score.at.site, UCEIS, 
+
+```{r table1.disease, echo=FALSE, message=FALSE}
+
+# The maximum sample number is in the rectum so will use this for numbers
+metadata.to.table <- metadata[metadata$Tissue.location == "Rectum",]
+
+# Functions for plotting continuos or categorical variables
+plotContinuous <- function(df, variable=""){
+    ggplot(df, aes_string(x="Disease", y=variable, colour="Disease")) + geom_boxplot() + geom_jitter(height=0, width=0.2) + theme_bw()     + facet_wrap(~Tissue) + stat_compare_means() + scale_colour_manual(values=group.colours) + ggtitle(variable)  
+}
+
+plotCategorical <- function(df, variable=""){
+  ggplot(df, aes_string(x="Disease", fill=variable)) + theme_bw() + geom_bar() + facet_wrap(~Tissue) + ggtitle(variable)
+}
+
+## Demographics
+age <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Age=metadata.to.table$Age)
+age.p <- plotContinuous(age, variable="Age")
+
+sex <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Sex=metadata.to.table$Sex)
+sex.p <- plotCategorical(sex, variable="Sex") + scale_fill_manual(values=c("slategrey", "lightblue"))
+# fisher test for significance
+sex.p <- sex.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(sex$Sex,sex$Disease))[[1]], 2))))
+
+
+## Inflammation
+nancy <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Nancy=as.factor(metadata.to.table$nancy))
+nancy.p <- plotCategorical(nancy, variable="Nancy") + scale_fill_manual(values=c("lightpink", "red", "red2", "red4"))
+nancy.p <- nancy.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(nancy$Nancy,nancy$Disease))[[1]], 2))))
+
+
+uceis <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, UCEIS=as.factor(metadata.to.table$UCEIS))
+uceis.p <- plotCategorical(uceis, variable="UCEIS") + scale_fill_manual(values=c("lightpink", "red", "red1", "red2", "red4"))
+uceis.p <- uceis.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(uceis$UCEIS,uceis$Disease))[[1]], 2))))
+
+
+## Liver function
+bil <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Bilirubin=metadata.to.table$Bilirubin)
+bil.p <- plotContinuous(bil, variable="Bilirubin")
+
+alp <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, ALP=metadata.to.table$ALP)
+alp.p <- plotContinuous(alp, variable="ALP")
+
+alt <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, ALT=metadata.to.table$ALT)
+alt.p <- plotContinuous(alt, variable="ALT")
+
+## Drugs
+urso <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, URSO=as.factor(metadata.to.table$Urso))
+urso.p <- plotCategorical(urso, variable="URSO") + scale_fill_manual(values=c("slategrey", "lightblue"))
+urso.p <- urso.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(urso$URSO,urso$Disease))[[1]], 2))))
+
+
+vedo <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Vedolizumab=as.factor(metadata.to.table$vedolizumab))
+vedo.p <- plotCategorical(vedo, variable="Vedolizumab") + scale_fill_manual(values=c("slategrey", "lightblue"))
+
+# couldn't do the following test because not enough data to compare - a lot of 0's
+# vedo.p <- vedo.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(vedo$Vedolizumab,vedo$Disease))[[1]], 2))))
+
+
+aza <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Azathioprine=as.factor(metadata.to.table$AZA.6MP.ISS))
+aza.p <- plotCategorical(aza, variable="Azathioprine") + scale_fill_manual(values=c("slategrey", "lightblue"))
+aza.p <- aza.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(aza$Azathioprine,aza$Disease))[[1]], 2))))
+
+
+asa <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, ASA=as.factor(metadata.to.table$X5.ASA))
+asa.p <- plotCategorical(asa, variable="ASA") + scale_fill_manual(values=c("slategrey", "lightblue"))
+asa.p <- asa.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(asa$ASA,asa$Disease))[[1]], 2))))
+
+
+steroids <- data.frame(Tissue=metadata.to.table$Tissue.location, Disease=metadata.to.table$Disease, Steroids=as.factor(metadata.to.table$steroid))
+steroids.p <- plotCategorical(steroids, variable="Steroids") + scale_fill_manual(values=c("slategrey", "lightblue"))
+steroids.p <- steroids.p + geom_text(aes(x=2, y=10, label=paste0("p = ",round(fisher.test(table(steroids$Steroids,steroids$Disease))[[1]], 2))))
+
+
+getMissing <- function(m, variable){
+  return(m$Individual[is.na(m[,variable])])
+}
+
+for (i in c("Sex", "Age", "nancy", "UCEIS", "Urso", "vedolizumab", "AZA.6MP.ISS", "X5.ASA", "steroid")){
+    cat(paste0(i, ":", getMissing(metadata.to.table, i), "\n"))}
+
+# plot the different categories
+
+# demographics
+g.d <- arrangeGrob(age.p + theme(legend.position = "none"), sex.p + theme(legend.position = "none"), nrow=1)
+grid.arrange (g.d)
+
+# Drugs
+g.drugs <- arrangeGrob(urso.p+ theme(legend.position = "none"), vedo.p+ theme(legend.position = "none"), asa.p+ theme(legend.position = "none"), aza.p+ theme(legend.position = "none"), steroids.p+ theme(legend.position = "none"), ncol=2, nrow=3)
+grid.arrange(g.drugs, nrow=1)
+
+# Inflammation
+g.i <- arrangeGrob(nancy.p+ theme(legend.position = "none"), uceis.p+ theme(legend.position = "none"), ncol=2)
+grid.arrange(g.i)
+
+# Liver function
+g.lf <- arrangeGrob(bil.p + theme(legend.position = "none"), alp.p + theme(legend.position = "none"), alt.p + theme(legend.position = "none"), ncol=3)
+grid.arrange(g.lf)
+
+# write out as pdf
+ggsave("export.dir/demographics.pdf", plot=g.d, width=6, height=3)
+ggsave("export.dir/drugs.pdf", plot=g.drugs, width=6, height=9)
+ggsave("export.dir/inflammation.pdf", plot=g.i, width=6, height=3)
+ggsave("export.dir/liver_function.pdf", plot=g.lf, width=9, height=3)
+
+```
+
+
+### Principle components analysis
+
+This is an initial look at principle components using log2cpm. I have already had a look at this as an exploratory analysis and removed patients that were outliers i.e. their expression profiles were inconsistent with tissue patterns and may have been the result of a sample swap. Also removed was a patient that had polyps.
+
+```{r cpm.pca.disease, echo=FALSE, message=FALSE}
+
+mat <- read.csv("counts/genes.tsv.gz", header=T, stringsAsFactors=F, sep="\t", row.names=1)
+colnames(mat) <- gsub(".hisat", "", colnames(mat))
+
+# colnames of mat need reformatting
+colnames(mat) <- gsub("_.*", "",colnames(mat))
+
+# filter counts matrix based on samples that are in the metadata
+mat <- mat[,metadata$Code]
+
+# filter the matrix
+mat <- filterGenes(mat, k=7, a=10)
+
+# get the cpm
+cpm <- log2cpm(mat)
+
+# Write out the matrix
+cpm.to.write <- cpm
+cpm.to.write$gene_id <- rownames(cpm.to.write)
+write.table(cpm.to.write, file="export.dir/MIGTranscriptome_0008.matrix", row.names=F, quote=F, sep="\t")
+
+
+pc <- runPCA(cpm, scale=FALSE)
+
+pc.df <- data.frame(pc$x)
+to.connect <- metadata$Individual
+
+# plot principle components
+p1 <- plotPrincipleComponents(pc, metadata, colourby="Tissue.location", shapeby="Disease", group="to.connect", pcs=c("PC1", "PC3"))
+p1 <- p1 + scale_colour_manual(values=tissue.colours) + geom_path(colour="lightgrey", linetype="dashed")
+ggsave("export.dir/pc1_pc3.pdf", height=5, width=5, units="in" )
+p1
+```
+
+#### PERMANOVA assessing tissue effects
+
+Here I look explicitly at whether there is a significant association between overall expression patterns and tissue site.
+
+```{r permanova.tissue.disease, echo=FALSE, message=FALSE}
+
+ad1 <- adonis(t(cpm) ~ Tissue.location, data=metadata)
+kable(ad1$aov.tab, caption="Tissue effect")
+
+```
+
+
+#### PCA at each tissue
+
+Here I look at the principle components analysis at each tissue location separately. This will help to detect if there are any differences by disease status that are somewhat masked by the huge amount of variation explained by tissue location.
+
+```{r pca.by.tissue.disease, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+pc.ileum <- runPCA(cpm[,metadata$Code[metadata$Tissue.location == "Ileum"]], scale=FALSE)
+pc.caecum <- runPCA(cpm[,metadata$Code[metadata$Tissue.location == "Caecum"]], scale=FALSE)
+pc.rectum <- runPCA(cpm[,metadata$Code[metadata$Tissue.location == "Rectum"]], scale=FALSE)
+
+metadata.ileum <- metadata[metadata$Tissue.location == "Ileum",]
+metadata.caecum <- metadata[metadata$Tissue.location == "Caecum",]
+metadata.rectum <- metadata[metadata$Tissue.location == "Rectum",]
+
+# plot principle components
+p2 <- plotPrincipleComponents(pc.ileum, metadata.ileum, group="Disease", colourby="Disease", pcs=c("PC1", "PC2"))
+p2 <- p2 + scale_colour_manual(values=group.colours)
+
+
+# plot principle components
+p3 <- plotPrincipleComponents(pc.caecum, metadata.caecum, group="Disease", colourby="Disease", pcs=c("PC1", "PC2"))
+p3 <- p3 + scale_colour_manual(values=group.colours)
+
+# plot principle components
+p4 <- plotPrincipleComponents(pc.rectum, metadata.rectum, group="Disease", colourby="Disease", pcs=c("PC1", "PC2"))
+p4 <- p4 + scale_colour_manual(values=group.colours)
+
+grid.arrange(p2, p3, p4, nrow=1)
+```
+
+There is not a clear clustering by group in terms of overall gene expression patterns. Nevertheless we can test for association using a PERMANOVA.
+
+
+#### PERMANOVA for disease associations at each tissue
+
+Below I test whether there is a difference in overall expression profiles by disease status. This is done in each tissue separately.
+
+```{r permanova.disease, echo=FALSE, message=FALSE}
+
+ad.ileum <- adonis(t(cpm[,rownames(metadata.ileum)]) ~ Disease, data=metadata.ileum)
+ad.caecum <- adonis(t(cpm[,rownames(metadata.caecum)]) ~ Disease, data=metadata.caecum)
+ad.rectum <- adonis(t(cpm[,rownames(metadata.rectum)]) ~ Disease, data=metadata.rectum)
+
+kable(ad.ileum$aov.tab, caption = "Ileum")
+kable(ad.caecum$aov.tab, caption = "Caecum")
+kable(ad.rectum$aov.tab, caption = "Rectum")
+
+```
+
+There look to be very subtle overall differences in overall gene expression profiles in terms of disease status. The strongest effects are in the ileum as noted by the highest R^2.
+
+### Differential expression analysis by group (disease)
+
+Below is the results of differential expression analysis using DESeq2. No covariates are taken into account (numbers are small). Initially I perform an overall test (LRT) to see which genes are differentially expressed between any group.
+
+```{r differential.expression.disease, echo=FALSE, message=FALSE}
+
+####################
+# analysis
+####################
+
+metadata.caecum <- metadata[metadata$Tissue.location == "Caecum",]
+metadata.ileum <- metadata[metadata$Tissue.location == "Ileum",]
+metadata.rectum <- metadata[metadata$Tissue.location == "Rectum",]
+
+mat.caecum <- mat[,rownames(metadata.caecum)]
+mat.ileum <- mat[,rownames(metadata.ileum)]
+mat.rectum <- mat[,rownames(metadata.rectum)]
+
+# convenience function for DESeq2
+runDESeq2 <- function(mat, metadata, results.file=NULL){
+
+    dds <- DESeqDataSetFromMatrix(countData = mat,
+                                  colData = metadata,
+                  	          design = ~ Disease)
+
+
+    # get gene names. TODO: Change this harcoding andn maybe how it's done.
+    # this is a slight problem for reproduciblity...
+    featureData <- makeFeatureData("annotations/gene_id2gene_name", mat)
+
+    # filtering > a in at least k samples (i.e. all of one condition)
+    keep <- rowSums(counts(dds) >= 0) >= 10
+    dds <- dds[keep,]
+
+    # make sure conditions are factors
+    dds$Disease <- factor(dds$Disease, levels=c("HEALTHY", "PSC/UC", "UC"))
+
+    # run analysis
+    dds.lrt <- DESeq(dds, test="LRT", fitType="local", reduced=~1)
+    res <- results(dds.lrt)
+
+    # get transformed counts
+    # rld <- rlog(dds, fitType="local", blind=TRUE)
+    # rldf <- data.frame(assay(rld))
+    # rldf$gene_id <- rownames(rldf)
+
+    # write table out
+    # write.table(rldf, file="export.dir/genes_rlog.tsv", row.names=F, quote=F, sep="\t")
+
+    # plot mean-variance relationship and dispersion
+    # estimates
+
+    # rld <- read.csv("export.dir/genes_rlog.tsv", header=T, stringsAsFactors=F, sep="\t")
+    # rownames(rld) <- rld$gene_id
+    # rld <- rld[,c(1:ncol(rld)-1)]
+
+    # par(mfrow=c(1,2))
+    # plotMeanSd(rld)
+    # plotDispEsts(dds.lrt)
+
+    results.table <- getResultsTable(res, featureData)
+    write.table(results.table, file=results.file, sep="\t", row.names=FALSE, quote=FALSE)
+    return(results.table)
+    }
+
+# Assume if one of these has run all have run
+if (!(file.exists("export.dir/de_caecum.tsv"))){
+
+caecum.res <- runDESeq2(mat.caecum, metadata.caecum, results.file="export.dir/de_caecum.tsv")
+ileum.res <- runDESeq2(mat.ileum, metadata.ileum, results.file="export.dir/de_ileum.tsv")
+rectum.res <- runDESeq2(mat.rectum, metadata.rectum, results.file="export.dir/de_rectum.tsv")
+}
+
+# Read the files back in
+caecum.res <- read.csv("export.dir/de_caecum.tsv", stringsAsFactors=FALSE, sep="\t", header=TRUE)
+rownames(caecum.res) <- caecum.res$gene_id
+ileum.res <- read.csv("export.dir/de_ileum.tsv", stringsAsFactors=FALSE, sep="\t", header=TRUE)
+rownames(ileum.res) <- ileum.res$gene_id
+rectum.res <- read.csv("export.dir/de_rectum.tsv", stringsAsFactors=FALSE, sep="\t", header=TRUE)
+rownames(rectum.res) <- rectum.res$gene_id
+```
+
+#### Number of significantly differentially expressed genes at each site.
+
+```{r number.of.differentially.expressed.genes.disease, echo=FALSE, message=FALSE}
+
+n.caecum <- nrow(caecum.res[caecum.res$padj < 0.05 & !(is.na(caecum.res$padj)),])
+n.ileum <- nrow(ileum.res[ileum.res$padj < 0.05 & !(is.na(ileum.res$padj)),])
+n.rectum <- nrow(rectum.res[rectum.res$padj < 0.05 & !(is.na(rectum.res$padj)),])
+
+ndiff <- data.frame("nsig.caecum" = n.caecum,
+                    "nsig.ileum" = n.ileum,
+                    "nsig.rectum" = n.rectum)
+library(knitr)
+kable(ndiff)
+
+
+# plot the overlap
+df <- data.frame("test.id" = caecum.res$gene_id,
+		  "caecum_padj" = caecum.res$padj,
+		  "ileum_padj" = ileum.res$padj,
+		  "rectum_padj" = rectum.res$padj)
+
+# remove rows containing NA's
+df <- na.omit(df)
+
+library(VennDiagram)
+pdf("export.dir/overlaps.pdf")
+threewayvenn(df)
+dev.off()
+
+```
+
+#### Heatmap of changes
+
+Below is a heatmap of all of the observed changes (union at each tissue site). This is to try to get a handle on whether there are any patterns there. I am also including the metadata to see if there are any obvious associations with factors such as inflammation.
+
+```{r heatmap.disease, fig.cap='Differential expression analysis', fig.height=10, fig.width=8,  echo=FALSE, message=FALSE}
+
+sig.ileum <- getSigGeneIDs(ileum.res)
+sig.caecum <- getSigGeneIDs(caecum.res)
+sig.rectum <- getSigGeneIDs(rectum.res)
+
+union.sig <- union(union(sig.ileum, sig.caecum), sig.rectum)
+
+cpm.union <- cpm[union.sig,]
+
+# Annotations
+sample.annotation <- data.frame(Group=metadata$Disease,
+                                "Urso"=metadata$Urso,
+                                "nancy.score.at.site"=metadata$nancy.score.at.site)
+rownames(sample.annotation) <- metadata$Code
+annotation.colours <- list("Tissue" = c(Caecum = blues9[6], Ileum = blues9[3], Rectum = blues9[9]),
+                           "Group" = c("HEALTHY" = "black", "PSC/UC" = "green4", "UC" = "red4"))
+
+
+heatmapMatrixWithSampleAnnotation(cpm.union[sig.ileum, metadata$Code[metadata$Tissue.location == "Ileum"]],
+                                  cluster_cols=TRUE,
+                                  ngradient=100,
+				                          labels=FALSE,
+				                          sample.annotation=sample.annotation,
+				                          annotation.colors=annotation.colours,
+				                          scale=TRUE,
+				                          clustering_distance="manhattan",
+				                          clustering_method="ward.D")
+
+heatmapMatrixWithSampleAnnotation(cpm.union[sig.caecum, metadata$Code[metadata$Tissue.location == "Caecum"]],
+                                  cluster_cols=TRUE,
+                                  ngradient=100,
+				                          labels=FALSE,
+				                          sample.annotation=sample.annotation,
+				                          annotation.colors=annotation.colours,
+				                          scale=TRUE,
+				                          clustering_distance="manhattan",
+				                          clustering_method="ward.D")
+
+heatmapMatrixWithSampleAnnotation(cpm.union[sig.rectum, metadata$Code[metadata$Tissue.location == "Rectum"]],
+                                  cluster_cols=TRUE,
+                                  ngradient=100,
+				                          labels=FALSE,
+				                          sample.annotation=sample.annotation,
+				                          annotation.colors=annotation.colours,
+				                          scale=TRUE,
+				                          clustering_distance="manhattan",
+				                          clustering_method="ward.D")
+
+```
+
+In the ileum, the PSC/UC and UC look fairly similar. The caecum looks to be more affected in PSC and the rectum more in UC. These patterns are more or less what we would have expected. As opposed to the tissue-defining clusters that we found there is no obvious clustering here and so pairwise comparisons are potentially going to identify more robust differences.
+
+### DESeq2 analysis at each site
+
+Below I run the analysis looking at each tissue separately and each pairwise comparison. The table summarises the results of these comparisons. We do not have enough samples to assess the impact of inflammation - in fact the vast majority of samples are not inflamed.
+
+```{r deseq.ileum.psc.healthy, echo=FALSE, message=FALSE}
+
+
+ileum.psc.healthy <- runDESeq2Pair(mat,
+                                   metadata,
+                                   geneid2gene_name="annotations/gene_id2gene_name",
+                        	         tissue="Ileum",
+	                                 results.file="export.dir/MIGTranscriptome_0008_IleumPSC-IleumHEALTHY.result",
+	                                 c1="HEALTHY",
+	                                 c2="PSC/UC")
+```
+
+```{r deseq.ileum.uc.healthy.disease, echo=FALSE, message=FALSE}
+
+ileum.uc.healthy <- runDESeq2Pair(mat,
+                                  metadata,
+                                  geneid2gene_name="annotations/gene_id2gene_name",
+				  tissue="Ileum",
+	                          results.file="export.dir/MIGTranscriptome_0008_IleumUC-IleumHEALTHY.result",
+	                          c1="HEALTHY",
+	                          c2="UC")
+
+```
+
+```{r deseq.ileum.psc.uc, echo=FALSE, message=FALSE}
+
+ileum.psc.uc <- runDESeq2Pair(mat,
+                              metadata,
+                              geneid2gene_name="annotations/gene_id2gene_name",
+                              
+		              tissue="Ileum",
+	                      results.file="export.dir/MIGTranscriptome_0008_IleumPSC-IleumUC.result",
+	                      c1="UC",
+	                      c2="PSC/UC")
+
+```
+
+```{r deseq.caecum.psc.healthy, echo=FALSE, message=FALSE}
+
+caecum.psc.healthy <- runDESeq2Pair(mat,
+                                    metadata,
+                                    geneid2gene_name="annotations/gene_id2gene_name",
+				    tissue="Caecum",
+	                            results.file="export.dir/MIGTranscriptome_0008_CaecumPSC-CaecumHEALTHY.result",
+	                            c1="HEALTHY",
+	                            c2="PSC/UC")
+```
+
+```{r deseq.caecum.uc.healthy, echo=FALSE, message=FALSE}
+
+caecum.uc.healthy <- runDESeq2Pair(mat,
+                                   metadata,
+                                   geneid2gene_name="annotations/gene_id2gene_name",
+				   tissue="Caecum",
+	                           results.file="export.dir/MIGTranscriptome_0008_CaecumUC-CaecumHEALTHY.result",
+	                           c1="HEALTHY",
+	                           c2="UC")
+
+```
+
+```{r deseq.caecum.psc.uc, echo=FALSE, message=FALSE}
+
+caecum.psc.uc <- runDESeq2Pair(mat,
+                               metadata,
+                               geneid2gene_name="annotations/gene_id2gene_name",
+			       tissue="Caecum",
+	                       results.file="export.dir/MIGTranscriptome_0008_CaecumPSC-CaecumUC.result",
+	                       c1="UC",
+	                       c2="PSC/UC")
+
+```
+
+```{r deseq.rectum.psc.healthy, echo=FALSE, message=FALSE}
+
+rectum.psc.healthy <- runDESeq2Pair(mat,
+                                    metadata,
+                                    geneid2gene_name="annotations/gene_id2gene_name",
+		                    tissue="Rectum",
+	                            results.file="export.dir/MIGTranscriptome_0008_RectumPSC-RectumHEALTHY.result",
+	                            c1="HEALTHY",
+	                            c2="PSC/UC")
+```
+
+```{r deseq.rectum.uc.healthy, echo=FALSE, message=FALSE}
+
+rectum.uc.healthy <- runDESeq2Pair(mat,
+                                   metadata,
+                                   geneid2gene_name="annotations/gene_id2gene_name",
+				   tissue="Rectum",
+	                           results.file="export.dir/MIGTranscriptome_0008_RectumUC-RectumHEALTHY.result",
+	                           c1="HEALTHY",
+	                           c2="UC")
+
+```
+
+```{r deseq.rectum.psc.uc, echo=FALSE, message=FALSE}
+
+rectum.psc.uc <- runDESeq2Pair(mat,
+                               metadata,
+                               geneid2gene_name="annotations/gene_id2gene_name",
+			       tissue="Rectum",
+	                       results.file="export.dir/MIGTranscriptome_0008_RectumPSC-RectumUC.result",
+	                       c1="UC",
+	                       c2="PSC/UC")
+
+```
+
+#### Table of results of differential expression
+
+Below are tables that summarise the differentially expressed genes between each disease group at each tissue site.
+
+```{r table.of.results.disease, echo=FALSE, message=FALSE}
+
+ileum.psc.healthy <- addSigColumn(ileum.psc.healthy, l2fold=0)
+ileum.uc.healthy <- addSigColumn(ileum.uc.healthy, l2fold=0)
+ileum.psc.uc <- addSigColumn(ileum.psc.uc, l2fold=0)
+
+caecum.psc.healthy <- addSigColumn(caecum.psc.healthy, l2fold=0)
+caecum.uc.healthy <- addSigColumn(caecum.uc.healthy, l2fold=0)
+caecum.psc.uc <- addSigColumn(caecum.psc.uc, l2fold=0)
+
+rectum.psc.healthy <- addSigColumn(rectum.psc.healthy, l2fold=0)
+rectum.uc.healthy <- addSigColumn(rectum.uc.healthy, l2fold=0)
+rectum.psc.uc <- addSigColumn(rectum.psc.uc, l2fold=0)
+
+kable(table(ileum.psc.healthy$sig), caption = "Ileum: PSC/UC vs Healthy")
+kable(table(ileum.uc.healthy$sig), caption = "Ileum: UC vs Healthy")
+kable(table(ileum.psc.uc$sig), caption = "Ileum: PSC/UC vs UC")
+
+kable(table(caecum.psc.healthy$sig), caption = "Caecum: PSC/UC vs Healthy")
+kable(table(caecum.uc.healthy$sig), caption = "Caecum: UC vs Healthy")
+kable(table(caecum.psc.uc$sig), caption = "Caecum: PSC/UC vs UC")
+
+kable(table(rectum.psc.healthy$sig), caption = "Rectum: PSC/UC vs Healthy")
+kable(table(rectum.uc.healthy$sig), caption = "Rectum: UC vs Healthy")
+kable(table(rectum.psc.uc$sig), caption = "Rectum: PSC/UC vs UC")
+```
+
+
+#### Heatmap the significant differences
+
+Below I draw a heatmap to show the union of significant differences between any pairwise comparison. I also output a venn diagram to show the overlaps between the tissue sites.
+
+```{r heatmap.union.disease, fig.height=15, fig.width=10, echo=FALSE, message=FALSE}
+
+union.ileum <- union(union(ileum.psc.healthy[!(is.na(ileum.psc.healthy$sig)), ]$gene_id,
+                           ileum.uc.healthy[!(is.na(ileum.uc.healthy$sig)), ]$gene_id),
+                           ileum.psc.uc[!(is.na(ileum.psc.uc$sig)),]$gene_id)
+
+union.caecum <- union(union(caecum.psc.healthy[!(is.na(caecum.psc.healthy$sig)), ]$gene_id,
+                           caecum.uc.healthy[!(is.na(caecum.uc.healthy$sig)), ]$gene_id),
+                           caecum.psc.uc[!(is.na(caecum.psc.uc$sig)),]$gene_id)
+
+union.rectum <- union(union(rectum.psc.healthy[!(is.na(rectum.psc.healthy$sig)), ]$gene_id,
+                           rectum.uc.healthy[!(is.na(rectum.uc.healthy$sig)), ]$gene_id),
+                     rectum.psc.uc[!(is.na(rectum.psc.uc$sig)),]$gene_id)
+
+union.of.differences <- union(union(union.ileum, union.caecum), union.rectum)
+
+cpm.union <- cpm[union.of.differences,]
+
+# Annotations
+sample.annotation <- data.frame(Group=metadata$Disease)
+rownames(sample.annotation) <- metadata$Code
+annotation.colours <- list("Tissue" = c(Caecum = blues9[6], Ileum = blues9[3], Rectum = blues9[9]),
+                           "Group" = c("HEALTHY" = "black", "PSC/UC" = "green3", "UC" = "red3"),
+                           "annotation" = c("NA"="grey", "both" = "brown", "PSC/UC" = "green3", "UC" = "red3"))
+
+# draw venn diagram of overlaps between each site
+pdf("export.dir/overlaps_across_tissues_venn.pdf")
+tovenn <- list(union.ileum, union.caecum, union.rectum)
+names(tovenn) <- c("Union Ileum", "Union Caecum", "Union Rectum")
+v <- venn.diagram(tovenn, filename=NULL,
+                      fill=c(blues9[3], blues9[6], blues9[9]),
+                      alpha=c(0.8,0.8,0.8),
+                      fontfamily=rep("sans", 7),
+                      cat.fontfamily=rep("sans", 3),
+                      cat.pos=c(0, 180, 180),
+                      cat.just=list(c(1,1), c(0,1), c(1,1)),
+                      margin=c(0.2,0.2,0.2,0.2))
+grid.draw(v)
+dev.off()
+```
+
+#### Ileum heatmap
+
+```{r ileum.heatmap.disease, fig.height=15, fig.width=10, echo=FALSE, message=FALSE}
+
+ileum.row.anno <- buildAnnotations(cpm[union.ileum,],
+                                   ileum.psc.healthy[!(is.na(ileum.psc.healthy$sig)), ]$gene_id,
+                                   ileum.uc.healthy[!(is.na(ileum.uc.healthy$sig)), ]$gene_id)
+ileum.row.anno$annotation <- gsub("list1", "PSC/UC", ileum.row.anno$annotation)
+ileum.row.anno$annotation <- gsub("list2", "UC", ileum.row.anno$annotation)
+
+#if (!(is.null(dev.cur()))){
+#  dev.off()
+#}
+#pdf("export.dir/ileum_heatmap.pdf", height=6, width=4)
+#pheatmap(cpm.union[union.ileum, metadata$sample[metadata$Tissue.location == "Ileum"]],
+#         annotation_row=ileum.row.anno,
+#         annotation_col=sample.annotation,
+#         annotation_colors=annotation.colours,
+#         scale="row",
+#         show_rownames=FALSE,
+#         show_colnames=FALSE,
+#         cluster_distance_cols="manhattan",
+#         clustering_method="ward.D",
+#         color=colorRampPalette(c("blue", "white", "red"))(75))
+#dev.off()
+
+pheatmap(cpm.union[union.ileum, metadata$sample[metadata$Tissue.location == "Ileum"]],
+         annotation_row=ileum.row.anno,
+         annotation_col=sample.annotation,
+         annotation_colors=annotation.colours,
+         scale="row",
+         show_rownames=FALSE,
+         show_colnames=FALSE,
+         cluster_distance_cols="manhattan",
+         clustering_method="ward.D",
+         color=colorRampPalette(c("blue", "white", "red"))(75))
+
+```
+
+#### Caecum heatmap
+
+```{r caecum.heatmap.disease, fig.height=15, fig.width=10, echo=FALSE, message=FALSE}
+
+caecum.row.anno <- buildAnnotations(cpm[union.caecum,],
+                                   caecum.psc.healthy[!(is.na(caecum.psc.healthy$sig)), ]$gene_id,
+                                   caecum.uc.healthy[!(is.na(caecum.uc.healthy$sig)), ]$gene_id)
+caecum.row.anno$annotation <- gsub("list1", "PSC/UC", caecum.row.anno$annotation)
+caecum.row.anno$annotation <- gsub("list2", "UC", caecum.row.anno$annotation)
+
+#if (!(is.null(dev.cur()))){
+#  dev.off()
+#}
+#pdf("export.dir/caecum_heatmap.pdf", height=6, width=4)
+pheatmap(cpm.union[union.caecum, metadata$sample[metadata$Tissue.location == "Caecum"]],
+         annotation_row=caecum.row.anno,
+         annotation_col=sample.annotation,
+         annotation_colors=annotation.colours,
+         scale="row",
+         show_rownames=FALSE,
+         show_colnames=FALSE,
+         cluster_distance_cols="manhattan",
+         clustering_method="ward.D",
+         color=colorRampPalette(c("blue", "white", "red"))(75))
+#dev.off()
+
+```
+
+
+#### Rectum heatmap
+
+```{r rectum.heatmap.disease, fig.height=15, fig.width=10, echo=FALSE, message=FALSE}
+
+rectum.row.anno <- buildAnnotations(cpm[union.rectum,],
+                                   rectum.psc.healthy[!(is.na(rectum.psc.healthy$sig)), ]$gene_id,
+                                   rectum.uc.healthy[!(is.na(rectum.uc.healthy$sig)), ]$gene_id)
+rectum.row.anno$annotation <- gsub("list1", "PSC/UC", rectum.row.anno$annotation)
+rectum.row.anno$annotation <- gsub("list2", "UC", rectum.row.anno$annotation)
+
+#if (!(is.null(dev.cur()))){
+#  dev.off()
+#}
+#pdf("export.dir/rectum_heatmap.pdf", height=6, width=4)
+pheatmap(cpm.union[union.rectum, metadata$sample[metadata$Tissue.location == "Rectum"]],
+         annotation_row=rectum.row.anno,
+         annotation_col=sample.annotation,
+         annotation_colors=annotation.colours,
+         scale="row",
+         show_rownames=FALSE,
+         show_colnames=FALSE,
+         cluster_distance_cols="manhattan",
+         clustering_method="ward.D",
+         color=colorRampPalette(c("blue", "white", "red"))(75))
+#dev.off()
+
+```
+
+
+### Correlating effect sizes
+
+In the following analysis I look at correlating fold changes between the two pairwise comparisons (i.e. each disease vs. healthy). This will reveal differences between the two disease conditions. It is exprected that if they are truly distinct in transcriptomic signatures that they will not be highly correlated.
+
+```{r scatter.fold.changes.disease, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+
+ileum.compare <- buildComparisonData(ileum.psc.healthy,
+                                     ileum.uc.healthy,
+                                     label1="PSC",
+                                     label2="UC")
+
+caecum.compare <- buildComparisonData(caecum.psc.healthy,
+                                      caecum.uc.healthy,
+                                      label1="PSC",
+                                      label2="UC")
+
+rectum.compare <- buildComparisonData(rectum.psc.healthy,
+                                      rectum.uc.healthy,
+                                      label1="PSC",
+                                      label2="UC")
+
+p.ileum <- scatterComparisons(ileum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") + theme(text=element_text(size=6))
+#+ xlim(-8,8) + ylim(-6,6) +
+p.caecum <- scatterComparisons(caecum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") + theme(text=element_text(size=6))
+p.rectum <- scatterComparisons(rectum.compare) + geom_abline(intercept = 0, slope=1, linetype="dashed") + theme(text=element_text(size=6))
+grid.arrange(p.ileum,
+             p.caecum,
+             p.rectum,
+             nrow=1,
+             ncol=3)
+ggsave("export.dir/ileum_scatterplot_fold_changes.png", plot=p.ileum, height=2, width=2, units="in")
+ggsave("export.dir/caecum_scatterplot_fold_changes.png", plot=p.caecum, height=2, width=2, units="in")
+ggsave("export.dir/rectum_scatterplot_fold_changes.png", plot=p.rectum, height=2, width=2, units="in")
+
+
+# table correlations
+ileum.cor <- cor.test(ileum.compare$PSC.l2fold, ileum.compare$UC.l2fold)
+caecum.cor <- cor.test(caecum.compare$PSC.l2fold, caecum.compare$UC.l2fold)
+rectum.cor <- cor.test(rectum.compare$PSC.l2fold, rectum.compare$UC.l2fold)
+
+
+cors.fc <- data.frame(ileum.cor=ileum.cor$estimate,
+                      ileum.p=ileum.cor$p.value,
+                      caecum.cor=caecum.cor$estimate,
+                      caecum.p=caecum.cor$p.value,
+                      rectum.cor=rectum.cor$estimate,
+                      rectum.p=rectum.cor$p.value)
+kable(cors.fc)
+
+# output venn diagrams
+pdf("export.dir/overlap_ileum.pdf")
+ileum.uc <- ileum.uc.healthy$gene_id[!(is.na(ileum.uc.healthy$sig))]
+ileum.psc <- ileum.psc.healthy$gene_id[!(is.na(ileum.psc.healthy$sig))]
+ileum.tovenn <- list(ileum.psc, ileum.uc)
+names(ileum.tovenn) <- c("PSC", "UC")
+v.ileum <- venn.diagram(ileum.tovenn, filename=NULL)
+grid.draw(v.ileum)
+dev.off()
+
+pdf("export.dir/overlap_caecum.pdf")
+caecum.uc <- caecum.uc.healthy$gene_id[!(is.na(caecum.uc.healthy$sig))]
+caecum.psc <- caecum.psc.healthy$gene_id[!(is.na(caecum.psc.healthy$sig))]
+caecum.tovenn <- list(caecum.psc, caecum.uc)
+names(caecum.tovenn) <- c("PSC", "UC")
+v.caecum <- venn.diagram(caecum.tovenn, filename=NULL)
+grid.draw(v.caecum)
+dev.off()
+
+pdf("export.dir/overlap_rectum.pdf")
+rectum.uc <- rectum.uc.healthy$gene_id[!(is.na(rectum.uc.healthy$sig))]
+rectum.psc <- rectum.psc.healthy$gene_id[!(is.na(rectum.psc.healthy$sig))]
+rectum.tovenn <- list(rectum.psc, rectum.uc)
+names(rectum.tovenn) <- c("PSC", "UC")
+v.rectum <- venn.diagram(rectum.tovenn, filename=NULL)
+grid.draw(v.rectum)
+dev.off()
+
+```
+
+These are certainly significantly correlated. The ileum shows some interesting patterns - especially for a handful of genes that look as if they are downregulated in UC but up-regulate in PSC. Should see what these are.
+
+
+### Markers of inflammation
+
+Very few of our samples have histological eveidence of inflammation. Nevertheless we are interested in whether there are any molecular (i.e. gene expression) markers of inflammation that might hint at any subclinical inflammation that might be present in the differnetial expression results. To test this I look at a few marker genes that are known to be robustly associated with ulcerative colitis namely, TNF, IL17A, IL12A, IL23A, [NOS2](https://pubmed.ncbi.nlm.nih.gov/10901620/) and S100A8. To look at this, I take the union of significantly differentially expressed genes from PSC/UC vs. Healthy and UC vs. Healthy and see whether these genes are differentially expressed.
+
+
+```{r inflammatory.markers, fig.height=10, fig.width=10, echo=FALSE, message=FALSE}
+
+inf.genes <- c("TNF", "IL17A", "IL12A", "IL23A", "NOS2", "S100A8")
+
+inf.ids <- ileum.psc.healthy$gene_id[ileum.psc.healthy$gene_name %in% inf.genes]
+
+# ileum
+sig.inf.ileum <- intersect(inf.ids, union.ileum)
+
+# caecum
+sig.inf.caecum <- intersect(inf.ids, union.caecum)
+
+# rectum
+sig.inf.rectum <- intersect(inf.ids, union.rectum)
+
+# names
+inflammation.names <- c("TNF", "NOS2", "IL23A", "IL17A")
+
+# sort out metadata for plotting purposes
+metadata$group <- factor(metadata$group,
+                         levels=c("IleumHEALTHY",
+                                  "IleumPSC/UC",
+                                  "IleumUC",
+                                  "CaecumHEALTHY",
+                                  "CaecumPSC/UC",
+                                  "CaecumUC",
+                                  "RectumHEALTHY",
+                                  "RectumPSC/UC",
+                                  "RectumUC"))
+
+# plot
+grobs.inflammation <- plotGenesOfInterestByTissue(inflammation.names,
+                                                  ileum.psc.healthy,
+                                                  cpm,
+                                                  metadata,
+                                                  combined.colours)
+
+
+grid.arrange(grobs=grobs.inflammation, nrow=2)
+```
+
+
+```{r heatmap.inflammatory.genes, fig.height=10, fig.width=10, echo=FALSE, message=FALSE}
+
+sample.annotation.inf <- data.frame(Group=metadata$Disease,
+                                    Tissue=metadata$Tissue.location,
+                                    ASA=as.factor(metadata$X5.ASA),
+                                    Vedolizumab=as.factor(metadata$vedolizumab),
+                                    Aza=as.factor(metadata$AZA.6MP.ISS),
+                                    Age=metadata$Age,
+                                    Sex=metadata$Sex,
+                                    Nancy=metadata$nancy.score.at.site)
+
+rownames(sample.annotation.inf) <- metadata$Code
+annotation.colours <- list("Tissue" = c(Caecum = blues9[6], Ileum = blues9[3], Rectum = blues9[9]),
+                           "Group" = c("HEALTHY" = "black", "PSC/UC" = "green4", "UC" = "red4"))
+
+mat.inf <- cpm[inf.ids,]
+rownames(mat.inf) <- ileum.psc.healthy[inf.ids,]$gene_name
+pheatmap(mat.inf,
+         scale="row",
+         annotation_col=sample.annotation.inf,
+         annotation_colors=annotation.colours,
+         color=colorRampPalette(c("blue", "white", "red"))(75))
+
+```
+
+
+It's kind of interesting because the inflammatory markers that I have chosen are only increased in the ileum - this is supposed to be a relatively uninvolved site. There may be some molecular inflammation that does not manifest as overt inflammation. By eye there are no obvious associations with any of the measured covariates like drugs or histology (Nancy here is the Nancy index at the tissue site sampled).
+
+
+### Enrichment of tissue clusters
+
+I initially had a hypothesis that the reason for not seeing very strong overlap in disease associations between tissue sites was because tissue-defining gene expression signatures were the things that were altered in disease states. Here I explore this hypothesis by looking at the enrichment of previously defined tissue clusters amongst genes that are significantly differentially expressed in either PSC/UC or UC.
+
+
+```{r tissue.cluster.enrichment.disease, echo=FALSE, message=FALSE}
+
+# get all gene names for each comparison of interest
+
+ileum.psc.healthy.names <- getSigGeneNames(ileum.psc.healthy)
+caecum.psc.healthy.names <- getSigGeneNames(caecum.psc.healthy)
+rectum.psc.healthy.names <- getSigGeneNames(rectum.psc.healthy)
+
+ileum.uc.healthy.names <- getSigGeneNames(ileum.uc.healthy)
+caecum.uc.healthy.names <- getSigGeneNames(caecum.uc.healthy)
+rectum.uc.healthy.names <- getSigGeneNames(rectum.uc.healthy)
+
+all.names <- as.character(ileum.psc.healthy$gene_name)
+
+foreground.tissue.clusters <- matrix(nrow=length(all.names),
+                                     ncol=7)
+
+for (i in 1:length(all.names)){
+  gene <- all.names[i]
+  foreground.tissue.clusters[i,1] <- gene
+  if (gene %in% ileum.psc.healthy.names){
+    foreground.tissue.clusters[i,2] <- 1
+  }
+  else if (gene %in% caecum.psc.healthy.names){
+    foreground.tissue.clusters[i,3] <- 1
+  }
+  else if (gene %in% rectum.psc.healthy.names){
+    foreground.tissue.clusters[i,4] <- 1
+  }
+  else if (gene %in% ileum.uc.healthy.names){
+    foreground.tissue.clusters[i,5] <- 1
+  } 
+  else if (gene %in% caecum.uc.healthy.names){
+    foreground.tissue.clusters[i,6] <- 1
+  }
+  else if (gene %in% rectum.uc.healthy.names){
+    foreground.tissue.clusters[i,7] <- 1
+  }
+}
+
+foreground.tissue.clusters[is.na(foreground.tissue.clusters)] <- 0
+colnames(foreground.tissue.clusters) <- c("gene_id",
+                                          "Ileum_PSC",
+                                          "Caecum_PSC",
+                                          "Rectum_PSC",
+                                          "Ileum_UC",
+                                          "Caecum_UC",
+                                          "Rectum_UC")
+
+foreground.tissue.clusters <- as.data.frame(foreground.tissue.clusters)
+
+write.table(foreground.tissue.clusters,
+            file="export.dir/foreground_tissue_clusters.tsv",
+            col.names=TRUE,
+            quote=FALSE,
+            row.names=FALSE,
+            sep="\t")
+
+background <- data.frame(gene_id=ileum.psc.healthy$gene_name)
+write.table(background,
+            file="export.dir/background.tsv",
+            sep="\t",
+            col.names=TRUE,
+            quote=FALSE,
+            row.names=FALSE)
+```
+
+```{r run.enrichment.disease, echo=FALSE, message=FALSE}
+
+if (!(file.exists("export.dir/tissue_clusters_enrichments.log"))){
+statement = "python /gfs/devel/nilott/cgat-developers-v0/cgat-apps/cgat/tools/runGO.py -g export.dir/foreground_tissue_clusters.tsv -b export.dir/background.tsv --filename-input=export.dir/tissue_genesets.tsv -q BH --ontology=Tissue.clusters --output-filename-pattern='export.dir/%(go)s.%(set)s.%(section)s' -t 0.05 --fdr --log=export.dir/tissue_clusters_enrichments.log"
+
+system(statement)
+}
+```
+
+```{r enrichment.cluster.plots.disease, echo=FALSE, message=FALSE, fig.height=10, fig.width=15}
+
+readFile <- function(x) return(read.csv(x, header=TRUE, stringsAsFactors=FALSE, sep="\t"))
+
+ileum.psc.enrichment <- readFile("export.dir/Tissue.clusters.Ileum_PSC.overall")
+ileum.psc.enrichment$Type <- "Ileum PSC vs. Healthy"
+
+caecum.psc.enrichment <- readFile("export.dir/Tissue.clusters.Caecum_PSC.overall")
+caecum.psc.enrichment$Type <- "Caecum PSC vs. Healthy"
+
+rectum.psc.enrichment <- readFile("export.dir/Tissue.clusters.Rectum_PSC.overall")
+rectum.psc.enrichment$Type <- "Rectum PSC vs. Healthy"
+
+ileum.uc.enrichment <- readFile("export.dir/Tissue.clusters.Ileum_UC.overall")
+ileum.uc.enrichment$Type <- "Ileum UC vs. Healthy"
+
+# the following doesn't exist - lack of annotations??
+# caecum.uc.enrichment <- readFile("export.dir/Tissue.clusters.Caecum_UC.overall")
+# caecum.uc.enrichment$Type <- "Caecum PUC vs. Healthy"
+
+rectum.uc.enrichment <- readFile("export.dir/Tissue.clusters.Rectum_UC.overall")
+rectum.uc.enrichment$Type <- "Rectum UC vs. Healthy"
+
+enrichment.res <- list(ileum.psc.enrichment,
+                       caecum.psc.enrichment,
+                       rectum.psc.enrichment,
+                       ileum.uc.enrichment,
+                       rectum.uc.enrichment)
+
+grobs = list()
+for (i in 1:length(enrichment.res)){
+  dat <- enrichment.res[[i]]
+  dat$goid <- factor(dat$goid, levels=c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster 5"))
+  p <- plotPathways(dat, plot.all=TRUE, relevel=FALSE) + scale_fill_manual(values=cluster.colors) + ggtitle(dat$Type) + theme(title = element_text(size=6)) + theme(axis.text = element_text(size=6)) + theme(axis.title = element_text(size=6))
+
+outfile <- paste0("export.dir/", gsub(" ", "_", dat$Type[1]), ".pdf")
+ggsave(outfile, height=2, width=2)
+grobs[[i]] <- p
+}
+
+grid.arrange(grobs=grobs, ncol=3, nrow=3)
+
+kable(bind_rows(enrichment.res))
+```
+
+It doesn't look exactly how I was expecting. In fact, particularly in the ileum there is an enrichment of cluster 2 genes (proliferation cluster) amongst differentially expressed genes. Below I explore in a little more detail what these are and how they relate to tissue-defining clusters.
+
+#### Cluster 2 genes altered in PSC/UC
+
+Interestingly it is not particularly genes that differentiate the ileum from other tissues that are altered in PSC/UC. Indeed, there is an enrichment of cluster 2 genes. Below I explore what these genes are.
+
+
+```{r ileum.cluster.genes.disease, echo=FALSE, message=FALSE, fig.height=35, fig.width=15}
+
+metadata$group <- factor(metadata$group,
+                         levels=c("IleumHEALTHY",
+                                  "IleumPSC/UC",
+                                  "IleumUC",
+                                  "CaecumHEALTHY",
+                                  "CaecumPSC/UC",
+                                  "CaecumUC",
+                                  "RectumHEALTHY",
+                                  "RectumPSC/UC",
+                                  "RectumUC"))
+
+genesets.clusters <- read.csv("export.dir/tissue_genesets.tsv", header=FALSE, stringsAsFactors=FALSE, sep="\t")
+
+geneset.genes.c2 <- getGenesetGenes(genesets.clusters, "Cluster 2")
+
+genes.ileum.cluster2 <- intersect(geneset.genes.c2, ileum.psc.healthy[union.ileum,]$gene_name)
+
+# just get ribosomal proteins
+genes.ileum.cluster2 <- as.character(genes.ileum.cluster2[grep("^RP[S|L]", as.character(genes.ileum.cluster2))])
+
+# add lymphocyte-specific helicase
+genes.ileum.cluster2 <- append("HELLS", genes.ileum.cluster2)
+
+# first 20
+grobs.ileum.cluster2 <- plotGenesOfInterestByTissue(genes.ileum.cluster2[1:20],
+                                                    ileum.psc.healthy,
+                                                    cpm,
+                                                    metadata,
+                                                    combined.colours)
+
+grid.arrange(grobs=grobs.ileum.cluster2, ncol=3, nrow=7)
+```
+
+Heatmap of everything. Will see how this looks in terms of adding into the manuscript.
+
+```{r ileum.cluster2.heatmap, echo=FALSE, message=FALSE, fig.height=10, fig.width=10}
+
+ileum.cluster2.ids <- ileum.psc.healthy[ileum.psc.healthy$gene_name %in% genes.ileum.cluster2,]$gene_id
+ileum.cpm <- cpm[ileum.cluster2.ids, metadata$Code]
+rownames(ileum.cpm) <- ileum.psc.healthy[ileum.cluster2.ids,]$gene_name
+
+ileum.heat <- colorRampPalette(c("lightblue", "white", "yellow2"))(20)
+
+ileum.cpm.s <- data.frame(t(apply(ileum.cpm, 1, scale))) 
+colnames(ileum.cpm.s) <- colnames(ileum.cpm)
+
+il <- ileum.cpm.s[,metadata.ileum$Code]
+ca <- ileum.cpm.s[,metadata.caecum$Code]
+re <- ileum.cpm.s[,metadata.rectum$Code]
+
+il.anno = HeatmapAnnotation(Tissue = metadata.ileum$Tissue.location,
+                            Group = metadata.ileum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+ca.anno = HeatmapAnnotation(Tissue = metadata.caecum$Tissue.location,
+                            Group = metadata.caecum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+re.anno = HeatmapAnnotation(Tissue = metadata.rectum$Tissue.location,
+                            Group = metadata.rectum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+Heatmap(il, name="Ileum", top_annotation=il.anno, border=TRUE, column_split = metadata.ileum$Disease) + Heatmap(ca, name="Caecum", top_annotation=ca.anno, border=TRUE, column_split = metadata.caecum$Disease) + Heatmap(re, name="Rectum", top_annotation=re.anno, border=TRUE, column_split = metadata.rectum$Disease)
+
+
+```
+
+
+#### Cluster 4 genes in PSC/UC
+
+There seems to be an increase in proliferative cells in PSC/UC ileum. I next investigate whether this is linked to B-cells i.e. those that are expressing antibody (BCR) which are cluster 4 genes. This would imply that there is an increase in proliferating B-cells in disease ileum vs. healthy.
+
+
+```{r ileum.cluster4.genes, echo=FALSE, message=FALSE, fig.height=5, fig.width=15}
+
+geneset.genes.c4 <- getGenesetGenes(genesets.clusters, "Cluster 4")
+
+genes.ileum.cluster4 <- intersect(geneset.genes.c4, as.character(ileum.psc.healthy[union.ileum,]$gene_name))
+
+# Get the Ig genes
+genes.ileum.cluster4 <- as.character(genes.ileum.cluster4[grep("^IG", genes.ileum.cluster4)])
+
+grobs.ileum.cluster4 <- plotGenesOfInterestByTissue(genes.ileum.cluster4,
+                                                    ileum.psc.healthy,
+                                                    cpm,
+                                                    metadata,
+                                                    combined.colours)
+
+grid.arrange(grobs=grobs.ileum.cluster4, ncol=3, nrow=1)
+```
+
+#### Cluster 4 genes in Caecum PSC/UC
+
+Cluster 4 genes are enriched in PSC/UC associated genes. Here I explore what these are.
+
+
+```{r caecum.cluster4.genes, echo=FALSE, message=FALSE, fig.height=20, fig.width=15}
+
+genes.caecum.cluster4 <- intersect(geneset.genes.c4, as.character(caecum.psc.healthy[union.caecum,]$gene_name))
+
+# T-cell related things seem important here - get these things
+genes.caecum.cluster4 <- as.character(genes.caecum.cluster4[grep("CD", genes.caecum.cluster4)])
+
+genes.caecum.cluster4 <- append(c("FOXP3", "IL7R", "CCL5"), genes.caecum.cluster4)
+
+grobs.caecum.cluster4 <- plotGenesOfInterestByTissue(genes.caecum.cluster4,
+                                                     caecum.psc.healthy,
+                                                     cpm,
+                                                     metadata,
+                                                     combined.colours)
+
+
+grid.arrange(grobs=grobs.caecum.cluster4, ncol=4, nrow=4)
+```
+
+FOXP3 is pretty interesting especially in PSC. This is because it seems to be up in the ileum and down in the caecum. This may suggest that these two tissues are linked by Tregs. If this was the case then we would expect to see a negative correlation between FOXP3 expression in the ileum vs. the caecum.
+
+```{r foxp3.ileum.vs.caecum, echo=FALSE, message=FALSE, fig.height=5, fig.width=5}
+
+samples <- intersect(metadata.ileum$Individual, metadata.caecum$Individual)
+metadata.ileum.to.compare <- metadata.ileum[metadata.ileum$Individual %in% samples,]
+metadata.caecum.to.compare <- metadata.caecum[metadata.caecum$Individual %in% samples,]
+
+# reorder
+metadata.caecum.to.compare <- metadata.caecum.to.compare[order(metadata.ileum.to.compare$Individual),]
+
+to.compare.df <- data.frame(foxp3.ileum=unlist(cpm["ENSG00000049768", metadata.ileum.to.compare$Code]),
+                            foxp3.caecum=unlist(cpm["ENSG00000049768", metadata.caecum.to.compare$Code]),
+                            disease=metadata.ileum.to.compare$Disease)
+
+
+p1 <- ggplot(to.compare.df, aes(x=foxp3.ileum, y=foxp3.caecum, group=disease, color=disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p3 + stat_smooth(method="lm")
+
+```
+
+
+There is no real correlation there so it is unlikely that the effects in one tissue are affecting the other.
+
+### Correlation between IL7R and FOXP3
+
+It is of interest that FOXP3 and IL7R are both downregulated in PSC/UC. The relationship between these two genes is somewhat hard to interpret - IL7 is important for Treg development in the thymus but it seems that in inflammation IL7R expression on a subset of T-cells (not Tregs) represents a pathogenic class of T cells. There is also evidence that activated Tregs express high levels of IL7R. Below I look at the correlation beween IL7R and FOXP3 expression within patients with PSC/UC. If co-expressed it would suggest that these genes are expressed from the same cell types.
+
+```{r cor.foxp3.il7R, message=FALSE, echo=FALSE, fig.height=5, fig.width=5}
+
+all.samples <- metadata[metadata$Tissue.location == "Caecum",]$Code
+mat.caecum.psc <- log2cpm(mat.caecum)[,all.samples]
+df.compare.il7r.foxp3 <- data.frame("IL7R" = unlist(mat.caecum.psc["ENSG00000168685",]),
+                                    "FOXP3" = unlist(mat.caecum.psc["ENSG00000049768",]),
+                                    Disease = metadata.caecum$Disease)
+
+p1 <- ggplot(df.compare.il7r.foxp3, aes(x=IL7R, y=FOXP3, color=Disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p4 <- p3 + stat_smooth(method="lm", se=FALSE) + stat_cor() + theme(legend.position="none")
+p4
+
+ggsave("export.dir/caecum_FOXP3_IL7R.pdf", plot=p4 + theme(text=element_text(size=6)), height=2, width=2)
+```
+
+These data are interesting as there is a definite positive correlation between FOXP3 and IL7R. I did a quick check for whether there was a significant difference between correlation coefficients PSC/UC and UC and there isn't (data not shown here). It is likely that the numbers are so small that we don't get a robust correlation. Therefore I would like to use more data - to this end I am going to try to remove the effect of disease from the expression measurements and do the correlations on all of the data at the same time. This should remove spurous correlation that could occur due to differences between groups but retain power to get a robust correlation. I do this using the limma function removeBatchEffect().
+
+```{r cor.remove.disease.effect, echo=FALSE, message=FALSE, fig.height=5, fig.width=5}
+
+all.samples <- metadata[metadata$Tissue.location == "Caecum",]$Code
+mat.caecum.all <- log2cpm(mat.caecum)[,all.samples]
+
+# remove batch effects
+mat.caecum.all <- limma::removeBatchEffect(mat.caecum.all, batch=metadata.caecum$Disease)
+
+df.compare.il7r.foxp3 <- data.frame("IL7R" = unlist(mat.caecum.all["ENSG00000168685",]),
+                                    "FOXP3" = unlist(mat.caecum.all["ENSG00000049768",]),
+                                    Disease = metadata.caecum$Disease)
+
+p1 <- ggplot(df.compare.il7r.foxp3, aes(x=IL7R, y=FOXP3, color=Disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p4 <- p3 + stat_smooth(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=IL7R, y=FOXP3), method="lm", se=FALSE) + stat_cor(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=IL7R, y=FOXP3)) + theme(legend.position="none")
+p4 
+
+ggsave("export.dir/caecum_FOXP3_IL7R_disease_removed.pdf", plot=p4 + theme(text=element_text(size=6)), height=2, width=2)
+
+```
+
+This appears to represent the average correlation which is what would be expected. The increased numbers means that the correlation is significant - it comes down to what to present in the manuscript. There is a balance between something that could end up being confusing due to removal of batch effects or confusing due to differences in correlations between groups. I think I will go for the former as I think it best represents the data.
+
+Given the correlation between IL7R and FOXP3 and evidence that [activated Tregs](https://pubmed.ncbi.nlm.nih.gov/20690182/) express high levels of IL7R, I thought it would be worth looking at the correlation between these genes and the activation markers, ICOS, CTLA4 and CD103 (ITGAE).
+
+```{r cor.activation.markers, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+
+all.samples <- metadata[metadata$Tissue.location == "Caecum",]$Code
+mat.caecum.all <- log2cpm(mat.caecum)[,all.samples]
+
+# remove batch effects
+mat.caecum.all <- limma::removeBatchEffect(mat.caecum.all, batch=metadata.caecum$Disease)
+
+icos.id <- caecum.psc.healthy[caecum.psc.healthy$gene_name == "ICOS",]$gene_id 
+ctla4.id <- caecum.psc.healthy[caecum.psc.healthy$gene_name == "CTLA4",]$gene_id 
+helios.id <- caecum.psc.healthy[caecum.psc.healthy$gene_name == "IKZF2",]$gene_id 
+cd69.id <- caecum.psc.healthy[caecum.psc.healthy$gene_name == "CD69",]$gene_id
+cd25.id <- caecum.psc.healthy[caecum.psc.healthy$gene_name == "IL2RA",]$gene_id 
+
+df.compare.il7r.foxp3 <- data.frame("IL7R" = unlist(mat.caecum.all["ENSG00000168685",]),
+                                    "FOXP3" = unlist(mat.caecum.all["ENSG00000049768",]),
+                                    "ICOS" = unlist(mat.caecum.all[icos.id,]),
+                                    "CTLA4" = unlist(mat.caecum.all[ctla4.id,]),
+                                    "HELIOS" = unlist(mat.caecum.all[helios.id,]),
+                                    "CD69" = unlist(mat.caecum.all[cd69.id,]),
+                                    "CD25" = unlist(mat.caecum.all[cd25.id,]),
+                                    Disease = metadata.caecum$Disease)
+
+p1 <- ggplot(df.compare.il7r.foxp3, aes(x=FOXP3, y=ICOS, color=Disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p4 <- p3 + stat_smooth(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=FOXP3, y=ICOS), method="lm", se=FALSE) + stat_cor(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=FOXP3, y=ICOS)) + theme(legend.position="none")
+p.foxp3.icos <- p4 
+
+
+p1 <- ggplot(df.compare.il7r.foxp3, aes(x=IL7R, y=ICOS, color=Disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p4 <- p3 + stat_smooth(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=IL7R, y=ICOS), method="lm", se=FALSE) + stat_cor(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=IL7R, y=ICOS)) + theme(legend.position="none")
+p.il7r.icos <- p4 
+
+
+p1 <- ggplot(df.compare.il7r.foxp3, aes(x=ICOS, y=CD103, color=Disease))
+p2 <- p1 + geom_point()
+p3 <- p2 + scale_color_manual(values=group.colours) + theme_bw()
+p4 <- p3 + stat_smooth(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=ICOS, y=CD103), method="lm", se=FALSE) + stat_cor(data=df.compare.il7r.foxp3, inherit.aes=FALSE, aes(x=ICOS, y=CD103)) + theme(legend.position="none")
+p.icos.cd103 <- p4 
+
+grid.arrange(p.foxp3.icos,
+             p.il7r.icos,
+	     nrow=3)
+
+# save the scatterplots
+ggsave("export.dir/FOXP3_ICOS_cor.pdf", plot=p.foxp3.icos + theme(text=element_text(size=6)), height=2, width=2)
+ggsave("export.dir/IL7R_ICOS_cor.pdf", plot=p.il7r.icos + theme(text=element_text(size=6)), height=2, width=2)
+
+```
+
+
+I think that this is pretty convincing evidence that we are looking at activated T cells here. Reductions of FOXP3 and IL7R and likely due to reductions in activated T cells - indeed ICOS is slightly (although not significantly donwregulated in psc). I next explore how to present these data potentially in a single figure rather than multiple scatterplots.
+
+```{r all.cor.activation, echo=FALSE, message=FALSE, fig.height=5, fig.width=5}
+
+cors.activation <- corr.test(df.compare.il7r.foxp3[,c(1:7)])
+cors.activation.r <- cors.activation$r
+cors.activation.p <- cors.activation$p
+
+cor.colors <- colorRampPalette(c("white", blues9[6]))(3)
+p.cors <- ggcorrplot(cors.activation.r, hc.order = TRUE, type = "upper", lab=TRUE, colors = cor.colors, p.mat=cors.activation.p)
+p.cors
+ggsave("export.dir/cors_activation.pdf", plot=p.cors + theme(text=element_text(size=6)), height=3, width=3.5)
+
+```
+
+I'm not convinced that I like just presenting the correlations and so will see if I can fit the scatterplots in the manuscript. 
+
+
+#### Cluster 4 genes in Rectum UC
+
+```{r rectum.uc.cluster4.genes, echo=FALSE, message=FALSE, fig.height=20, fig.width=15}
+
+genes.rectum.cluster4 <- intersect(as.character(geneset.genes.c4), as.character(rectum.uc.healthy.names))
+
+grobs.rectum.cluster4 <- plotGenesOfInterestByTissue(genes.rectum.cluster4,
+                                                     rectum.psc.healthy,
+                                                     cpm,
+                                                     metadata,
+                                                     combined.colours)
+
+grid.arrange(grobs=grobs.rectum.cluster4, ncol=4, nrow=4)
+```
+
+
+#### Cluster 4 genes in Rectum UC
+
+```{r rectum.uc.cluster3.genes, echo=FALSE, message=FALSE, fig.height=15, fig.width=15}
+geneset.genes.c3 <- getGenesetGenes(genesets.clusters, "Cluster 3")
+
+genes.rectum.cluster3 <- intersect(geneset.genes.c3, as.character(rectum.uc.healthy[union.rectum,]$gene_name))
+
+grobs.rectum.cluster3 <- plotGenesOfInterestByTissue(genes.rectum.cluster3,
+                                                     rectum.psc.healthy,
+                                                     cpm,
+                                                     metadata,
+                                                     combined.colours)
+
+grid.arrange(grobs=grobs.rectum.cluster3, ncol=4, nrow=4)
+```
+
+### PSC-specific changes
+
+Although globally PSC/UC and UC look quite similar i.e. correlated effect sizes, we did still call a handful of genes as differentially abundant between PSC/UC and UC. Below are the plots of genes called as significantly differentially expressed in each tissue site. 
+
+#### Ileum PSC/UC vs. UC
+
+```{r psc.specific.ileum, echo=FALSE, message=FALSE, fig.height=5, fig.width=15}
+
+ileum.psc.names <- as.character(getSigGeneNames(ileum.psc.uc))
+
+grobs.ileum.psc <- plotGenesOfInterestByTissue(ileum.psc.names,
+                                               ileum.psc.uc,
+                                               cpm,
+                                               metadata,
+                                               combined.colours)
+
+grid.arrange(grobs=grobs.ileum.psc, ncol=3, nrow=1)
+
+```
+
+#### Caecum PSC/UC vs. UC
+
+```{r psc.specific.caecum, echo=FALSE, message=FALSE, fig.height=30, fig.width=15}
+
+caecum.psc.names <- as.character(getSigGeneNames(caecum.psc.uc))
+
+grobs.caecum.psc <- plotGenesOfInterestByTissue(caecum.psc.names,
+                                               caecum.psc.uc,
+                                               cpm,
+                                               metadata,
+                                               combined.colours)
+
+grid.arrange(grobs=grobs.caecum.psc, ncol=3, nrow=6)
+
+```
+
+#### Rectum PSC/UC vs. UC
+
+No genes were significantly differentially expressed between PSC/UC and UC in the rectum.
+
+### GGT1 expression
+
+Manually looking at these genes suggests that these are predominantly lowly expressed and only seen as different in a handful of patients, especially in the ileum. However, one gene particularly stands out and that is GGT1 - it is significantly lower in expression in both the caecum and the ileum.
+
+This gene is potentially very interesting as it regulates glutathione scavenging. It is expressed at the cell membrane and transfers groups from glutahione to cysteine. This then allows uptake of the molecule into cells to be converted back into glutathione that is useful for mopping up reactive oxygen etc. This therefore leads to an hypothesis about its role in inflammation-driven cancer - in the presence of inflammation where there is an increase in reactive oxygen, PSC patients are less able to protect against reactive oxygen-driven DNA-damgage. This may then lead to an increase in the number of somatic, cancer-driving mutations. This is only likely the case where there is inflammation - hence why the ileum may be spared from cancer in these patients.
+
+#### GGT1 and liver function tests
+
+We have data on the outcomes of liver function tests i.e. bilirubin, Alkaline Phosphatase (ALP) and Alanine aminotransferase (ALT). Unfortunately we don't have GGT analysis although I am hoping that we can use these other biochemical measurements as markers of the extent of cholestasis. 
+
+#### Biochemical analysis between groups
+
+We have some data for all groups (although some are missing data on liver function tests). Here I just plot the levels that we observe for each individual.
+
+```{r biochemistry, fig.height=10, fig.width=10, echo=FALSE, message=FALSE}
+
+# bilirubin
+p.bil <- ggplot(metadata.ileum, aes(x=Disease, y=Bilirubin, color=Disease)) + geom_boxplot() + geom_jitter(height=0, width=0.20) + theme_bw() + scale_color_manual(values=group.colours) + ggtitle("Bilirubin") + theme(legend.position="none") + stat_compare_means(label="p.signif", comparisons=list(c("PSC/UC", "HEALTHY"), c("UC", "HEALTHY"), c("PSC/UC", "UC")))
+
+# ALT
+p.alt <- ggplot(metadata.ileum, aes(x=Disease, y=ALT, color=Disease)) + geom_boxplot() + geom_jitter(height=0, width=0.20) + theme_bw() + scale_color_manual(values=group.colours) + ggtitle("ALT") + theme(legend.position="none") + stat_compare_means(label="p.signif", comparisons=list(c("PSC/UC", "HEALTHY"), c("UC", "HEALTHY"), c("PSC/UC", "UC")))
+
+# ALP
+p.alp <- ggplot(metadata.ileum, aes(x=Disease, y=ALP, color=Disease)) + geom_boxplot() + geom_jitter(height=0, width=0.20) + theme_bw() + scale_color_manual(values=group.colours) + ggtitle("ALP") + theme(legend.position="none") + stat_compare_means(label="p.signif", comparisons=list(c("PSC/UC", "HEALTHY"), c("UC", "HEALTHY"), c("PSC/UC", "UC")))
+
+# ratio of ALP/AST- cholestasis
+metadata.ileum$ALP.ALT <- metadata.ileum$ALP/metadata.ileum$ALT
+p.ratio <- ggplot(metadata.ileum, aes(x=Disease, y=ALP.ALT, color=Disease)) + geom_boxplot() + geom_jitter(height=0, width=0.20) + theme_bw() + scale_color_manual(values=group.colours) + ggtitle("ALP/ALT") + theme(legend.position="none") + stat_compare_means(label="p.signif", comparisons=list(c("PSC/UC", "HEALTHY"), c("UC", "HEALTHY"), c("PSC/UC", "UC")))
+
+grid.arrange(grobs=list(p.bil, p.alt, p.alp, p.ratio), nrow=2)
+
+```
+
+### Correlations with GGT1
+
+I am interested in whether GGT1 expression is associated with bile acid transport - in this way the hypothesis is that it would be negatively coreelated with biochemical markers of cholestasis. Below I look at the correlation between GGT1 and biochemical markers in each tissue site.
+
+#### Bilirubin
+
+```{r cor.bil.with.ggt1, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+
+# get GGT1 expression data
+ggt1.id <- ileum.psc.healthy[ileum.psc.healthy$gene_name == "GGT1",]$gene_id
+
+ggt1.toplot <- metadata
+ggt1.toplot$GGT1 <- unlist(cpm[ggt1.id,])
+ggt1.toplot$ALP.ALT <- ggt1.toplot$ALP/ggt1.toplot$ALT
+
+# Ileum
+ggt1.toplot.ileum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Ileum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.ileum <- ggplot(ggt1.toplot.ileum, aes(x=Bilirubin, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se = FALSE) + stat_cor() + ggtitle("Ileum")
+
+# Caecum
+ggt1.toplot.caecum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Caecum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.caecum <- ggplot(ggt1.toplot.caecum, aes(x=Bilirubin, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Caecum")
+
+# Rectum
+ggt1.toplot.rectum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Rectum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.rectum <- ggplot(ggt1.toplot.rectum, aes(x=Bilirubin, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Rectum")
+
+grid.arrange(grobs=list(p.ggt.ileum, p.ggt.caecum, p.ggt.rectum), nrow=1)
+
+ggsave("export.dir/ileum_ggt1_bilirubin.pdf", plot=p.ggt.ileum, height=2, width=2)
+ggsave("export.dir/caecum_ggt1_bilirubin.pdf", plot=p.ggt.caecum, height=2, width=2)
+ggsave("export.dir/rectum_ggt1_bilirubin.pdf", plot=p.ggt.rectum, height=2, width=2)
+```
+
+#### ALT
+
+```{r cor.alt.with.ggt1, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+
+# Ileum
+ggt1.toplot.ileum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Ileum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.ileum <- ggplot(ggt1.toplot.ileum, aes(x=ALT, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se = FALSE) + stat_cor() + ggtitle("Ileum")
+
+# Caecum
+ggt1.toplot.caecum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Caecum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.caecum <- ggplot(ggt1.toplot.caecum, aes(x=ALT, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Caecum")
+
+# Rectum
+ggt1.toplot.rectum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Rectum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.rectum <- ggplot(ggt1.toplot.rectum, aes(x=ALT, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Rectum")
+
+grid.arrange(grobs=list(p.ggt.ileum, p.ggt.caecum, p.ggt.rectum), nrow=1)
+
+
+```
+
+#### ALP
+
+```{r cor.alp.with.ggt1, fig.height=5, fig.width=15, echo=FALSE, message=FALSE}
+
+# Ileum
+ggt1.toplot.ileum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Ileum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.ileum <- ggplot(ggt1.toplot.ileum, aes(x=ALP, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se = FALSE) + stat_cor() + ggtitle("Ileum")
+
+# Caecum
+ggt1.toplot.caecum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Caecum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.caecum <- ggplot(ggt1.toplot.caecum, aes(x=ALP, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Caecum")
+
+# Rectum
+ggt1.toplot.rectum <- ggt1.toplot[ggt1.toplot$Tissue.location == "Rectum" & ggt1.toplot$Disease == "PSC/UC",]
+p.ggt.rectum <- ggplot(ggt1.toplot.rectum, aes(x=ALP, y=GGT1)) + geom_point() + theme_bw() + stat_smooth(method="lm", se=FALSE) + stat_cor() + ggtitle("Rectum")
+
+grid.arrange(grobs=list(p.ggt.ileum, p.ggt.caecum, p.ggt.rectum), nrow=1)
+```
+
+There isn't a clear relationship between GGT1 and biochemical markers of cholestasis, although fairly strong negative cor between GGT1 and bilirubin in the ileum. There are a few strong positive associations for ALT and ALP in the rectum. These are however quite dirven by an outlier. I think with such few samples it is very difficult to draw any conclusions from these data.
+
+```{r write.for.cybersort, echo=FALSE, message=FALSE}
+
+# write out for cybersort
+cpm.cyber <- cpm
+gene.symbols <- data.frame(Gene = ileum.psc.healthy[rownames(cpm.cyber),]$gene_name)
+cpm.cyber <- cbind(gene.symbols, cpm.cyber)
+write.table(cpm.cyber, file="export.dir/cpm_cyber.tsv", row.names=FALSE, sep="\t", quote=FALSE)
+
+```
+
+### CIBERSORT analysis
+
+It was suggested that I run CIBERSORT in order to determine if there were any differences in cell populations between the disease states. This was particularly suggested by Beth to see if there was a reduction in Tregs in the Caecum in PSC/UC. I have used single cell expression data from the [human gut cell atlas](https://www.gutcellatlas.org) in order to generate a custom signatures matrix. This was then used for the deconvolution of cell fractions in our RNA-seq data. I ran this using the web application with the following parameters:
+
+>Running CIBERSORTxFractions...
+>[Options] mixture: files/nicholas.ilott@kennedy.ox.ac.uk/cpm_cyber.tsv
+>[Options] sigmatrix: files/nicholas.ilott@kennedy.ox.ac.uk/CIBERSORTx_Job12_immune_cells_inferred_phenoclasses.CIBERSORTx_Job12_immune_cells_inferred_refsample.bm.K999.txt
+>[Options] perm: 1000
+>[Options] verbose: TRUE
+>[Options] QN: FALSE
+>[Options] outdir: files/nicholas.ilott@kennedy.ox.ac.uk/results/
+>[Options] label: Job13
+>=============CIBERSORTx Settings===============
+>Mixture file: files/nicholas.ilott@kennedy.ox.ac.uk/cpm_cyber.tsv 
+>Signature matrix file: files/nicholas.ilott@kennedy.ox.ac.uk/CIBERSORTx_Job12_immune_cells_inferred_phenoclasses.CIBERSORTx_Job12_immune_cells_inferred_refsample.bm.K999.txt 
+>Number of permutations set to: 1000 
+>Enable verbose output
+
+```{r cibersort, echo=FALSE, message=FALSE}
+
+ciber.res <- read.csv("annotations/teichmann_fractions.txt", header=TRUE, stringsAsFactors=FALSE, sep="\t", row.names=1)
+ciber.res <- ciber.res[,1:(ncol(ciber.res)-3)]
+
+ciber.metadata <- metadata
+
+# order the same as metadata
+ciber.res <- ciber.res[rownames(metadata),]
+
+ciber.res <- as.data.frame(t(ciber.res))
+
+```
+
+#### CIBERSORT in the ileum
+
+```{r ileum.ciber, echo=FALSE, message=FALSE, fig.width=25, fig.height=25}
+
+# Ileum
+ciber.res.ileum <- ciber.res[,metadata.ileum$Code]
+plotGeneOfInterest("Ileum", ciber.res.ileum, metadata.ileum, variable="Disease") + scale_color_manual(values=group.colours) + stat_compare_means(comparisons = list(c("HEALTHY", "PSC/UC"), c("HEALTHY", "UC"), c("PSC/UC", "UC"))) + facet_wrap(~test_id, ncol=5, scale="free")
+```
+
+#### CIBERSORT in the caecum
+
+```{r caecum.ciber, echo=FALSE, message=FALSE, fig.width=25, fig.height=25}
+# Caecum
+ciber.res.caecum <- ciber.res[,metadata.caecum$Code]
+plotGeneOfInterest("Caecum", ciber.res.caecum, metadata.caecum, variable="Disease") + scale_color_manual(values=group.colours) + stat_compare_means(comparisons = list(c("HEALTHY", "PSC/UC"), c("HEALTHY", "UC"), c("PSC/UC", "UC"))) + facet_wrap(~test_id, ncol=5, scale="free")
+```
+
+#### CIBERSORT in the rectum
+
+```{r rectum.ciber, echo=FALSE, message=FALSE, fig.width=25, fig.height=25}
+# Rectum
+ciber.res.rectum <- ciber.res[,metadata.rectum$Code]
+plotGeneOfInterest("Rectum", ciber.res.rectum, metadata.rectum, variable="Disease") + scale_color_manual(values=group.colours) + stat_compare_means(comparisons = list(c("HEALTHY", "PSC/UC"), c("HEALTHY", "UC"), c("PSC/UC", "UC"))) + facet_wrap(~test_id, ncol=5, scale="free")
+```
+
+There is nothing major going on in terms of predicted cell frequencies. This is likely due to the complexity of the regulation as assessed by bulk RNA-seq. 
+
+
+### Visualisation in heatmap
+
+It looks like the ComplexHeatmap package might come to the rescue and be able to get the numerous genes, clusters and conditions plotted in a single heatmap so that the data do not have to be displayed as boxplots. I explore below whether this is the case:
+
+```{r all.heatmap, echo=FALSE, message=FALSE, fig.height=20, fig.width=30}
+genes.ileum.cluster2 <- intersect(geneset.genes.c2, ileum.psc.healthy[union.ileum,]$gene_name)
+#genes.ileum.cluster4 <- intersect(geneset.genes.c4, ileum.psc.healthy[union.ileum,]$gene_name)
+
+# get all of the genes that I want to plot
+all.genes <- append(append(genes.ileum.cluster2, genes.caecum.cluster4), genes.rectum.cluster4)
+all.ids <- ileum.psc.healthy$gene_id[ileum.psc.healthy$gene_name %in% all.genes]
+all.genes <- ileum.psc.healthy[all.ids,]$gene_name
+
+# add cluster annotations to this data frame
+clusters.df <- read.csv("/gfs/work/nilott/proj039/analysis/differential_expression_tissues1/export.dir/tissue_genesets.tsv", header=FALSE, stringsAsFactors=FALSE, sep="\t")
+
+clusters <- c()
+for (i in all.genes){
+  cluster.assignment <- clusters.df[clusters.df$V2 == i,]$V3
+  clusters <- append(clusters, cluster.assignment)
+}
+
+all.genes <- data.frame(gene = ileum.psc.healthy[all.ids,]$gene_name,
+                        gene_id = all.ids,
+                        cluster = clusters)
+all.genes$Tissue <- ifelse(all.genes$gene %in% genes.ileum.cluster2, "Ileum", NA)
+#all.genes$Tissue <- ifelse(all.genes$gene %in% genes.ileum.cluster4, "Ileum", all.genes$Tissue)
+all.genes$Tissue <- ifelse(all.genes$gene %in% genes.caecum.cluster4, "Caecum", all.genes$Tissue)
+all.genes$Tissue <- ifelse(all.genes$gene %in% genes.rectum.cluster4, "Rectum", all.genes$Tissue)
+
+ribosomal = ifelse(grepl("^RP[S|L]", all.genes$gene) == TRUE, "Ribosomal", "Non-ribosomal")
+
+left.annotation <- rowAnnotation(Cluster = all.genes$cluster, Tissue = all.genes$Tissue, Ribosomal = ribosomal, col = list(Cluster = c("Cluster 2" = "#FFFFB3", "Cluster 4" = "#FB8072"), Tissue = c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]), Ribosomal = c("Ribosomal" = "Purple", "Non-ribosomal" = "grey")))
+
+
+all.cpm <- cpm[all.ids,]
+rownames(all.cpm) <- ileum.psc.healthy[all.ids,]$gene_name
+all.cpm.s <- data.frame(t(apply(all.cpm, 1, scale))) 
+colnames(all.cpm.s) <- colnames(all.cpm)
+
+# annotations for genes of interest
+gene.list <- c("FOXP3", "IL7R", "CD3E", "CD3G", "CD3D", "CD52", "CD2", "CD6", "RPL5", "RPL18A", "HELLS", "RPL36", "L1TD1", "ALG1L", "RFXANK", "ZMAT5")
+goi.indices <- which(rownames(all.cpm.s) %in% gene.list)
+goi.indices <- list(c(goi.indices[1:8]), c(goi.indices[9:12]), c(goi.indices[13:16]))
+
+il <- all.cpm.s[,metadata.ileum$Code]
+ca <- all.cpm.s[,metadata.caecum$Code]
+re <- all.cpm.s[,metadata.rectum$Code]
+
+il.anno = HeatmapAnnotation(Tissue = metadata.ileum$Tissue.location,
+                            Group = metadata.ileum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+ca.anno = HeatmapAnnotation(Tissue = metadata.caecum$Tissue.location,
+                            Group = metadata.caecum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+re.anno = HeatmapAnnotation(Tissue = metadata.rectum$Tissue.location,
+                            Group = metadata.rectum$Disease,
+                            col=list(Tissue=c("Ileum" = blues9[3], "Caecum" = blues9[6], "Rectum" = blues9[9]),
+                                     Group=c("PSC/UC" = "green4", "UC" = "red4", "HEALTHY" = "black")))
+
+##################################################################
+# Annotate names in zoomed in boxes - sort of helps readability
+##################################################################
+
+panel.fun <- function(index){
+
+  labels <- rownames(il[index,])
+  labels <- split(labels, ceiling(seq_along(labels)/10))
+  labels.list <- list()
+  for (i in 1:length(labels)){
+    l <- paste(labels[[i]], sep="", collapse=", ")
+    labels.list[[i]] <- l
+  }
+  labels <- paste(labels.list, sep="", collapse="\n")
+    
+  g <- ggplot() + annotate("text", x=0, y=25, label=labels, hjust=0, size=5) + xlim(c(0,10))
+  g <- g + theme(panel.background=element_rect(fill="white", colour="white"))
+	g <- g + theme(panel.grid.major=element_line(colour="white"))
+  g <- g + theme(panel.grid.minor=element_line(colour="white"))
+  g <- g + theme(legend.position="none")
+  g <- g + theme(axis.line=element_blank())
+  g <- g + theme(axis.text.x=element_blank())
+  g <- g + theme(axis.text.y=element_blank())
+  g <- g + theme(axis.ticks=element_blank())
+  g <- g + theme(axis.title.x=element_blank())
+  g <- g + theme(axis.title.y=element_blank())
+  
+  g = grid.grabExpr(print(g))
+  pushViewport(viewport())
+  grid.rect()
+  grid.draw(g)
+  popViewport()
+}
+
+#############################
+# Tring out a heatmap zoom
+#############################
+panel.fun.heat <- function(index){
+
+    ht <- Heatmap(all.cpm.s[index,], name="Ileum", column_split = metadata$Tissue.location, cluster_column_slices=FALSE, row_split=all.genes$Tissue[index], row_gap=unit(0.3, "cm"), column_gap=unit(0.2, "cm"))
+  
+  g = grid.grabExpr(draw(ht))
+  grid.draw(g)
+}
+
+genes.anno <- anno_zoom(align_to = all.genes$Tissue, panel_fun = panel.fun, which="row", width = unit(10, "in"), size=c(0.5,4,0.5), gap=unit(2, "cm"))
+
+anno.heat <- anno_zoom(align_to = goi.indices, panel_fun = panel.fun.heat, which="row")
+
+ht_list <- Heatmap(il, name="Ileum", top_annotation=il.anno, border=TRUE, column_split = metadata.ileum$Disease, cluster_column_slices=FALSE, row_split=all.genes$Tissue, left_annotation = left.annotation, row_gap=unit(0.3, "cm"), column_gap=unit(0.2, "cm")) + Heatmap(ca, name="Caecum", top_annotation=ca.anno, border=TRUE, column_split = metadata.caecum$Disease, cluster_column_slices=FALSE, row_split=all.genes$Tissue) + Heatmap(re, name="Rectum", top_annotation=re.anno, border=TRUE, column_split = metadata.rectum$Disease, cluster_column_slices=FALSE, row_names_gp = gpar(fontsize = 0), row_split = all.genes$Tissue, right_annotation = rowAnnotation(genes = genes.anno))
+
+#pdf("export.dir/combined_differences_heatmap.pdf", height=14, width=25)
+draw(ht_list, ht_gap = unit(1, "cm"))
+#dev.off()
+dev.off()
+#draw(ht_list, ht_gap = unit(1, "cm"))
+
+```
+
+### Session Info
+
+```{r sessionInfo, echo=FALSE, message=FALSE}
+print(capture.output(sessionInfo()))
+```
+
+
+
