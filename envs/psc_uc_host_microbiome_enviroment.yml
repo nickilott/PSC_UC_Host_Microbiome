@@ -18,7 +18,7 @@ dependencies:
   - bioconductor-vsn=3.54.0
   - r-base=3.6.1
   - r-biocmanager=1.30.10
-  - r-broom-0.5.2
+  - r-broom=0.5.2
   - r-data.table=1.12.8
   - r-dbplyr=1.4.3
   - r-devtools=2.0.2
