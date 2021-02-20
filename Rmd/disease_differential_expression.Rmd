@@ -1596,7 +1596,7 @@ all.ids <- ileum.psc.healthy$gene_id[ileum.psc.healthy$gene_name %in% all.genes]
 all.genes <- ileum.psc.healthy[all.ids,]$gene_name
 
 # add cluster annotations to this data frame
-clusters.df <- read.csv("/gfs/work/nilott/proj039/analysis/differential_expression_tissues1/export.dir/tissue_genesets.tsv", header=FALSE, stringsAsFactors=FALSE, sep="\t")
+clusters.df <- read.csv("export.dir/tissue_genesets.tsv", header=FALSE, stringsAsFactors=FALSE, sep="\t")
 
 clusters <- c()
 for (i in all.genes){
