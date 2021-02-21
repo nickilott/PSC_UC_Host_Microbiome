@@ -57,9 +57,6 @@ names(combined.colours) <- c("IleumUC",
 
 ```
 
-# DESeq2 Summary Report 
-
-We have shown that there are no differences between tissue sites. However there is a significant effect on overall microbiome composition (beta diversity) of disease. It may be that even the same bacteria are having different associations at each site. We have also seen that there is a significant association betwen beta diversity and sequencing batch (these were also processed at a different time). Therefore sequencing batch will be added as a covariate in all the downstream analysis.
 
 ```{r load.libraries.16s.diff, echo=FALSE, message=FALSE}
 library(gplots)
@@ -95,6 +92,8 @@ if (!(dir.exists("export.dir"))){
 ### Overview
 
 This is an analysis that looks to determine differentially abundant features between tissues and/or disease groups.
+
+We have shown that there are no differences between tissue sites. However there is a significant effect on overall microbiome composition (beta diversity) of disease. It may be that even the same bacteria are having different associations at each site. We have also seen that there is a significant association betwen beta diversity and sequencing batch (these were also processed at a different time). Therefore sequencing batch will be added as a covariate in all the downstream analysis.
 
 ### Overall numbers
 
