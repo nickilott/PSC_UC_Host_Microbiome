@@ -30,10 +30,7 @@ I have to admit that I had issues when trying to install sva-devel (that contain
 
 ## Download metadata from figshare
 
-In order to run the analysis you will also have to have access to patient metadata, counts tables and annotation files. These have been deposited on figshare and you can do the following to download them. Make sure you are in your local  PSC_UC_Host_Microbiome/ code directory.
-
-```
-```
+In order to run the analysis you will also have to have access to patient metadata, counts tables and annotation files. Download the metadata.zip, counts.zip and annotations.zip from the project at [figshare](https://figshare.com/projects/Tissue-dependent_transcriptional_and_bacterial_associations_in_primary_sclerosing_cholangitis-associated_inflammatory_bowel_disease/97364). These should be downloaded into the PSC_UC_Host_Microbiome/ directory and unzipped there. 
 
 
 ## Pre-made html report
@@ -43,7 +40,7 @@ While I fully expect you to be able to re-run the analysis (maybe), I have also 
 
 ## Run the analyses
 
-Once you have activate the correct conda environment, downloaded sva-devel and downloaded the relevant files from figshare you should simply be able to start R and run:
+Once you have activate the correct conda environment, downloaded sva-devel and downloaded the relevant files from figshare make sure you are in the repository directory and you should simply be able to start R and run:
 
 ```
 rmarkdown::render("Rmd/PSC_UC_Host_Microbiome.Rmd", output_format="html_document")
