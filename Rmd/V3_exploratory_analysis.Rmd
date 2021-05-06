@@ -153,7 +153,7 @@ First I look at the general characteristics of the data in terms of the major ph
 ```{r phyla, fig.height=5, fig.width=22, echo=FALSE, message=FALSE}
 
 # read in data
-phyla <- read.csv("/gfs/work/nilott/proj031_proj040/analysis/V3/dada2_1/taxonomy_abundances.dir/phylum_abundance.tsv",
+phyla <- read.csv("counts/phylum_abundance.tsv",
                   header=TRUE,
 		  stringsAsFactors=FALSE,
 		  sep="\t",
