@@ -17,7 +17,7 @@ It should be straightforward to re-run the analyses using the same environment a
 
 ```
 cd <path-to-repo>/PSC_UC_Host_Microbiome
-conda create env -f envs/psc_uc_host_microbiome_enviroment.yml
+conda env create -f envs/psc_uc_host_microbiome_enviroment.yml
 conda activate psc_uc_host_microbiome
 ```
 
@@ -27,6 +27,9 @@ This will create an environment with all of the relevant dependencies installed.
 
 I have to admit that I had issues when trying to install sva-devel (that contains CombatSeq) from github. Therefore I did a little workaround that was suggested on github issues. This suggestion was to download the code and run the individual R scripts without installing. This worked for me and so in order to re-run my analyses you will have to do the same. From inside the PSC_UC_Host_Microbiome/ directory, clone [sva-devel](https://github.com/jtleek/sva-devel). Having done this the scripts that are required by my scripts will be in the correct location.
 
+```
+git clone https://github.com/jtleek/sva-devel.git
+```
 
 ## Download metadata from figshare
 
@@ -35,7 +38,7 @@ In order to run the analysis you will also have to have access to patient metada
 
 ## Pre-made html report
 
-While I fully expect you to be able to re-run the analysis (maybe), I have also put the final report in this repository so that you can browse the analyses that were undertaken. This report is split into sections that largely correspond to the order of the manuscript although there are additional analyses in here that did not make it into the manuscript but are kept for reasons of transparency.
+While I fully expect you to be able to re-run the analysis (maybe), I have also put the final report in this repository (report/PSC_UC_Host_Microbiome.html) so that you can browse the analyses that were undertaken. This report is split into sections that largely correspond to the order of the manuscript although there are additional analyses in here that did not make it into the manuscript but are kept for reasons of transparency.
 
 
 ## Run the analyses
