@@ -1,4 +1,5 @@
-https://zenodo.org/badge/DOI/10.5281/zenodo.4808793.svg
+
+![doi](https://zenodo.org/badge/DOI/10.5281/zenodo.4808793.svg)
 
 # Tissue-dependent transcriptional and bacterial associations in primary sclerosing cholangitis-associated inflammatory bowel disease
 
