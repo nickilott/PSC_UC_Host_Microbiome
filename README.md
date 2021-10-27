@@ -5,7 +5,7 @@
 
 ## Overview
 
-This repository contains code that was used to analyse data from [pu](publication_url). Briefly, the aim of the study was to investigate changes in gene expression in PSC/UC relative to healthy controls and patients with UC. In addition, we also analysed 16S rRNA amplicon sequencing data in order to look for genus abundance changes in these same disease cohorts. I have attempted to make the analyses performed in the manuscript as reproducible as I can and in theory all of the figures from the manuscript (as well as additional analyses) should be able to be reproduced by following the instructions below.
+This repository contains code that was used to analyse data from this [manuscript](https://wellcomeopenresearch.org/articles/6-199). Briefly, the aim of the study was to investigate changes in gene expression in PSC/UC relative to healthy controls and patients with UC. In addition, we also analysed 16S rRNA amplicon sequencing data in order to look for genus abundance changes in these same disease cohorts. I have attempted to make the analyses performed in the manuscript as reproducible as I can and in theory all of the figures from the manuscript (as well as additional analyses) should be able to be reproduced by following the instructions below.
 
 ## The scripts
 
